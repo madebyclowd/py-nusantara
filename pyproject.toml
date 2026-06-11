@@ -1,0 +1,26 @@
+[project]
+name = "py-nusantara"
+version = "0.1.0"
+description = "A customizable, enterprise-ready Python package for Indonesia's administrative regions database."
+readme = "README.md"
+authors = [
+    { name = "Gede Widiantara", email = "gdwidi13@gmail.com" }
+]
+requires-python = ">=3.12"
+dependencies = []
+
+[project.optional-dependencies]
+sqlalchemy = ["sqlalchemy>=2.0.0"]
+pandas = ["pandas>=2.0.0"]
+redis = ["redis>=5.0.0"]
+
+[dependency-groups]
+dev = [
+    "pytest>=8.0.0",
+    "sqlalchemy>=2.0.0",
+    "pandas>=2.0.0",
+]
+
+[build-system]
+requires = ["uv_build>=0.11.20,<0.12.0"]
+build-backend = "uv_build"

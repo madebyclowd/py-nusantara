@@ -1,0 +1,47 @@
+name: Release Package
+
+on:
+  push:
+    tags:
+      - 'v*'
+
+permissions:
+  contents: write
+  id-token: write  # Required for PyPI Trusted Publishing OIDC authentication
+
+jobs:
+  release:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Checkout code
+        uses: actions/checkout@v4
+
+      - name: Install uv
+        uses: astral-sh/setup-uv@v3
+        with:
+          version: "latest"
+          enable-cache: true
+
+      - name: Set up Python
+        run: uv python install "3.12"
+
+      - name: Build distribution packages (wheel and sdist)
+        run: uv build
+
+      - name: Publish package to PyPI
+        # Note: Requires setting up PyPI Trusted Publishing (OIDC) for this repository:
+        # https://docs.pypi.org/tidelift/trusted-publishers/
+        uses: pypa/gh-action-pypi-publish@release/v1
+        with:
+          # If not using OIDC, configure PyPI token secrets and use:
+          # password: ${{ secrets.PYPI_API_TOKEN }}
+          skip-existing: true
+
+      - name: Create GitHub Release
+        uses: softprops/action-gh-release@v2
+        with:
+          files: |
+            dist/*
+          draft: false
+          prerelease: false
+          generate_release_notes: true

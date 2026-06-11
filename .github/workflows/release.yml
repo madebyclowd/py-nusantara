@@ -41,7 +41,8 @@ jobs:
         uses: softprops/action-gh-release@v2
         with:
           files: |
-            dist/*
+            dist/*.tar.gz
+            dist/*.whl
           draft: false
           prerelease: false
           generate_release_notes: true

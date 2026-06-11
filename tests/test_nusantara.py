@@ -271,3 +271,193 @@ def test_boundary_integration(tmp_path):
     assert db_prov.boundary == "SPATIAL:POLYGON((95.3 5.5, 95.4 5.6, 95.4 5.5, 95.3 5.5))"
     
     session.close()
+
+
+def test_singleton_thread_safety():
+    import py_nusantara
+    from concurrent.futures import ThreadPoolExecutor
+    py_nusantara._global_instance = None # reset
+    
+    def get_facade():
+        return py_nusantara._get_instance()
+        
+    with ThreadPoolExecutor(max_workers=10) as executor:
+        instances = list(executor.map(lambda _: get_facade(), range(20)))
+        
+    first_id = id(instances[0])
+    for inst in instances:
+        assert id(inst) == first_id
+
+
+def test_path_traversal_detection():
+    nus = Nusantara()
+    with pytest.raises(ValueError, match="Directory traversal attempt detected"):
+        nus.reader._get_file_path("../../unsafe.csv.gz")
+
+
+def test_verify_checksum_disabled(tmp_path):
+    import gzip
+    import csv
+    
+    # Create mock provinces.csv.gz file (its hash won't match manifest)
+    mock_file = tmp_path / "provinces.csv.gz"
+    headers = ["id", "name", "capital", "latitude", "longitude", "elevation", "timezone", "area", "population", "boundary"]
+    rows = [["11", "Aceh", "Banda Aceh", "5.5", "95.3", "12.0", "WIB", "56789.0", "5000000", ""]]
+    with gzip.open(mock_file, "wt", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        writer.writerows(rows)
+        
+    # verify_checksum: False
+    config_dict = {
+        "boundaries": {
+            "local_path": str(tmp_path),
+            "verify_checksum": False
+        }
+    }
+    
+    nus = Nusantara(config_dict)
+    # This should succeed without raising IntegrityError because verify_checksum is False
+    provs = nus.provinces()
+    assert len(provs) == 1
+    assert provs[0].name == "Aceh"
+
+
+def test_redis_cache_scoped_clear(monkeypatch):
+    from py_nusantara.cache import RedisCache
+    
+    class MockRedisClient:
+        def __init__(self):
+            self.keys = ["nusantara.key1", "nusantara.key2", "other.key3"]
+        def scan_iter(self, match):
+            pattern = match.replace("*", "")
+            return [k for k in self.keys if k.startswith(pattern)]
+        def delete(self, *keys):
+            for k in keys:
+                if k in self.keys:
+                    self.keys.remove(k)
+        def flushdb(self):
+            self.keys.clear()
+            
+    # Mock redis module
+    import sys
+    from types import ModuleType
+    mock_redis_module = ModuleType("redis")
+    mock_redis_module.from_url = lambda url, **kwargs: MockRedisClient()
+    sys.modules["redis"] = mock_redis_module
+    
+    # Test with prefix
+    cache = RedisCache("redis://localhost:6379", prefix="nusantara")
+    assert len(cache._client.keys) == 3
+    cache.clear()
+    assert "nusantara.key1" not in cache._client.keys
+    assert "nusantara.key2" not in cache._client.keys
+    assert "other.key3" in cache._client.keys # should not be deleted
+    
+    # Test without prefix
+    cache_no_prefix = RedisCache("redis://localhost:6379")
+    cache_no_prefix.clear()
+    assert len(cache_no_prefix._client.keys) == 0 # everything deleted
+
+
+def test_find_by_coordinate_centroid_fallback():
+    # Use real core dataset centroids
+    # Aceh: lat=5.53, lon=95.32
+    from py_nusantara import find_by_coordinate
+    res = find_by_coordinate(5.5, 95.3, fallback_to_nearest=True)
+    
+    # It should fallback to the nearest centroid since boundaries are not loaded/present
+    assert res["province"] is not None
+    assert res["province"].name == "Aceh"
+    assert res["regency"] is not None
+    assert res["district"] is not None
+    assert res["village"] is not None
+
+
+def test_find_by_coordinate_no_fallback():
+    from py_nusantara import find_by_coordinate
+    # If fallback is False and no boundary files exist, all should be None
+    res = find_by_coordinate(5.5, 95.3, fallback_to_nearest=False)
+    assert res["province"] is None
+    assert res["regency"] is None
+    assert res["district"] is None
+    assert res["village"] is None
+
+
+def test_find_by_coordinate_exact_boundary(tmp_path):
+    import gzip
+    import csv
+    from py_nusantara import Nusantara
+    
+    # Create mock cache files containing boundaries
+    mock_prov = tmp_path / "provinces.csv.gz"
+    headers = ["id", "name", "capital", "latitude", "longitude", "elevation", "timezone", "area", "population", "boundary"]
+    rows = [["11", "Aceh", "Banda Aceh", "5.5", "95.3", "12.0", "WIB", "56789.0", "5000000", "[[[5.0, 95.0], [6.0, 95.0], [6.0, 96.0], [5.0, 96.0], [5.0, 95.0]]]"]]
+    with gzip.open(mock_prov, "wt", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        writer.writerows(rows)
+
+    mock_reg = tmp_path / "regencies.csv.gz"
+    headers_reg = ["id", "province_id", "name", "capital", "latitude", "longitude", "elevation", "timezone", "area", "population", "boundary"]
+    rows_reg = [["1101", "11", "Kabupaten Aceh Selatan", "Tapak Tuan", "3.2", "97.2", "15.0", "WIB", "4000.0", "200000", "[[[5.1, 95.1], [5.9, 95.1], [5.9, 95.9], [5.1, 95.9], [5.1, 95.1]]]"]]
+    with gzip.open(mock_reg, "wt", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers_reg)
+        writer.writerows(rows_reg)
+
+    mock_dist = tmp_path / "districts.csv.gz"
+    headers_dist = ["id", "regency_id", "name", "latitude", "longitude", "boundary"]
+    rows_dist = [["110101", "1101", "Bakongan", "3.0", "97.4", "[[[5.2, 95.2], [5.8, 95.2], [5.8, 95.8], [5.2, 95.8], [5.2, 95.2]]]"]]
+    with gzip.open(mock_dist, "wt", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers_dist)
+        writer.writerows(rows_dist)
+
+    mock_vil = tmp_path / "villages_11.csv.gz"
+    headers_vil = ["id", "district_id", "name", "postal_code", "latitude", "longitude", "boundary"]
+    rows_vil = [["1101012001", "110101", "Keude Bakongan", "23773", "3.0", "97.4", "[[[5.3, 95.3], [5.7, 95.3], [5.7, 95.7], [5.3, 95.7], [5.3, 95.3]]]"]]
+    with gzip.open(mock_vil, "wt", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers_vil)
+        writer.writerows(rows_vil)
+
+    # Override manifest hashes for test files
+    import hashlib
+    from py_nusantara.manifest import Manifest
+    for name, path in [("provinces.csv.gz", mock_prov), ("regencies.csv.gz", mock_reg), ("districts.csv.gz", mock_dist), ("villages_11.csv.gz", mock_vil)]:
+        sha = hashlib.sha256()
+        with open(path, "rb") as file_bin:
+            while chunk := file_bin.read(8192):
+                sha.update(chunk)
+        Manifest.HASHES[name] = sha.hexdigest()
+
+    config_dict = {
+        "columns": {
+            "provinces": {"boundary": {"name": "boundary", "enabled": True}},
+            "regencies": {"boundary": {"name": "boundary", "enabled": True}},
+            "districts": {"boundary": {"name": "boundary", "enabled": True}},
+            "villages": {"boundary": {"name": "boundary", "enabled": True}},
+        },
+        "boundaries": {
+            "local_path": str(tmp_path),
+            "verify_checksum": True
+        }
+    }
+    
+    nus = Nusantara(config_dict)
+    nus.clear_cache()
+    
+    # 5.5, 95.4 falls inside the polygons of all 4 mock entities
+    res = nus.find_by_coordinate(5.5, 95.4, fallback_to_nearest=False)
+    
+    assert res["province"] is not None
+    assert res["province"].name == "Aceh"
+    assert res["regency"] is not None
+    assert res["regency"].name == "Kabupaten Aceh Selatan"
+    assert res["district"] is not None
+    assert res["district"].name == "Bakongan"
+    assert res["village"] is not None
+    assert res["village"].name == "Keude Bakongan"
+
+

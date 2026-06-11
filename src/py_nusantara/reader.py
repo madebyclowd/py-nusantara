@@ -1,11 +1,14 @@
 import csv
 import gzip
 import sys
+import logging
 from pathlib import Path
 from typing import Any, Dict, Generator, Iterator, List, Optional
 from py_nusantara.config import NusantaraConfig
 from py_nusantara.exceptions import DataNotFoundError
 from py_nusantara.manifest import Manifest
+
+logger = logging.getLogger("py_nusantara")
 
 # Increase CSV field size limit to support large geographic boundary coordinate shapes.
 max_limit = sys.maxsize
@@ -43,15 +46,24 @@ class NusantaraReader:
         # 1. Try to read from local boundary cache folder
         cache_filepath = cache_dir / filename
         if cache_filepath.exists():
-            try:
-                Manifest.verify(cache_filepath)
+            verify_checksum = boundaries_cfg.get("verify_checksum", True)
+            if verify_checksum:
+                try:
+                    Manifest.verify(cache_filepath)
+                    return cache_filepath
+                except Exception as e:
+                    logger.warning(f"Cached file integrity check failed for {filename}: {e}. Falling back to core package files.")
+            else:
                 return cache_filepath
-            except Exception:
-                # Checksum fails or invalid file, fallback to core files
-                pass
 
         # 2. Fallback to package core files (shipped defaults without boundaries)
-        filepath = self.data_dir / relative_path
+        # Securely resolve path to prevent directory traversal
+        resolved_data_dir = self.data_dir.resolve()
+        filepath = (resolved_data_dir / relative_path).resolve()
+        if not filepath.is_relative_to(resolved_data_dir):
+            logger.error(f"Directory traversal attempt blocked: {relative_path}")
+            raise ValueError("Directory traversal attempt detected.")
+
         if not filepath.exists():
             raise DataNotFoundError(f"Dataset file not found: {filepath}")
 

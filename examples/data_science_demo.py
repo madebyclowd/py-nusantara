@@ -41,7 +41,17 @@ def main():
         if records:
             print(f"Found in {level}: {[r.name for r in records]}")
 
-    # 5. Geographic Boundaries Download and Loading
+    # 5. Reverse Geocoding (Coordinate Resolution)
+    print("\n--- 3b. Reverse Geocoding (Coordinate Resolution) ---")
+    lat, lon = 5.5, 95.3
+    print(f"Resolving regions for coordinate: Latitude={lat}, Longitude={lon} (Centroid Fallback)...")
+    regions = nus.find_by_coordinate(lat, lon, fallback_to_nearest=True)
+    print(f"Resolved Province: {regions['province'].name if regions['province'] else 'None'}")
+    print(f"Resolved Regency: {regions['regency'].name if regions['regency'] else 'None'}")
+    print(f"Resolved District: {regions['district'].name if regions['district'] else 'None'}")
+    print(f"Resolved Village: {regions['village'].name if regions['village'] else 'None'}")
+
+    # 6. Geographic Boundaries Download and Loading
     print("\n--- 4. Geographic Boundaries (GIS) ---")
     
     # Enable boundary column in config dynamically

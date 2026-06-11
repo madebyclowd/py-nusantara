@@ -2,11 +2,14 @@ import os
 import json
 import urllib.request
 import shutil
+import logging
 from pathlib import Path
 from typing import Any, Dict, List, Optional, Union
 from py_nusantara.config import NusantaraConfig
 from py_nusantara.manifest import Manifest
 from py_nusantara.exceptions import NusantaraError, IntegrityError
+
+logger = logging.getLogger("py_nusantara")
 
 
 def get_default_cache_dir() -> Path:
@@ -161,6 +164,7 @@ def download_boundaries(
 
     cdn_url = boundaries_cfg.get("cdn_url", "https://github.com/madebyclowd/laravel-nusantara/releases/download").rstrip("/")
     version = boundaries_cfg.get("version") or "v1.1.0"
+    verify_checksum = boundaries_cfg.get("verify_checksum", True)
 
     downloaded_paths = []
 
@@ -171,12 +175,12 @@ def download_boundaries(
             village_files = [k for k in Manifest.HASHES.keys() if k.startswith("villages_")]
             for filename in village_files:
                 filepath = resolved_cache_dir / filename
-                if _resolve_single_file(filename, filepath, cdn_url, version, force, progress_callback):
+                if _resolve_single_file(filename, filepath, cdn_url, version, force, progress_callback, verify_checksum):
                     downloaded_paths.append(filepath)
         else:
             filename = f"{level}.csv.gz"
             filepath = resolved_cache_dir / filename
-            if _resolve_single_file(filename, filepath, cdn_url, version, force, progress_callback):
+            if _resolve_single_file(filename, filepath, cdn_url, version, force, progress_callback, verify_checksum):
                 downloaded_paths.append(filepath)
 
     return downloaded_paths
@@ -189,21 +193,27 @@ def _resolve_single_file(
     version: str,
     force: bool,
     progress_callback: Optional[Any],
+    verify_checksum: bool = True,
 ) -> bool:
     """Download and verify a single boundary file, returning True if resolved successfully."""
     # Check if already exists and is valid
     if not force and filepath.exists():
-        try:
-            Manifest.verify(filepath)
+        if verify_checksum:
+            try:
+                Manifest.verify(filepath)
+                if progress_callback:
+                    progress_callback("skip", filename)
+                return True
+            except IntegrityError:
+                logger.warning(f"Checksum mismatch for cached file: {filename}. Redownloading...")
+        else:
             if progress_callback:
                 progress_callback("skip", filename)
             return True
-        except IntegrityError:
-            # Checksum invalid, will redownload
-            pass
 
     # Build download URL
     url = f"{cdn_url}/{version}/{filename}"
+    logger.info(f"Downloading boundary dataset file: {filename} from {url}")
     if progress_callback:
         progress_callback("download_start", filename)
 
@@ -213,17 +223,19 @@ def _resolve_single_file(
             url,
             headers={"User-Agent": "py-nusantara-downloader/0.1.0"}
         )
-        with urllib.request.urlopen(req) as response, open(temp_filepath, "wb") as out_file:
+        with urllib.request.urlopen(req, timeout=30) as response, open(temp_filepath, "wb") as out_file:
             shutil.copyfileobj(response, out_file)
         
         # Verify integrity of downloaded temp file
-        Manifest.verify(temp_filepath)
+        if verify_checksum:
+            Manifest.verify(temp_filepath)
         
         # Move to actual location
         if filepath.exists():
             filepath.unlink()
         temp_filepath.rename(filepath)
         
+        logger.info(f"Successfully downloaded and verified: {filename}")
         if progress_callback:
             progress_callback("download_success", filename)
         return True
@@ -231,6 +243,7 @@ def _resolve_single_file(
     except Exception as e:
         if temp_filepath.exists():
             temp_filepath.unlink()
+        logger.error(f"Failed to download boundary file '{filename}' from {url}: {e}")
         if progress_callback:
             progress_callback("download_failed", f"{filename}: {str(e)}")
         # Raise for tracked files, ignore if verify_checksum is bypassed (we keep it strict by default)

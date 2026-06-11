@@ -1,11 +1,14 @@
 from typing import Any, Dict, List, Optional, Type, Union
 import gzip
 import csv
+import logging
 from pathlib import Path
 from py_nusantara.config import NusantaraConfig
 from py_nusantara.reader import NusantaraReader
 from py_nusantara.downloader import json_to_wkt, get_default_cache_dir
 from py_nusantara.exceptions import DataNotFoundError
+
+logger = logging.getLogger("py_nusantara")
 
 try:
     import sqlalchemy as sa
@@ -201,6 +204,7 @@ class NusantaraSeeder:
             batch_size: Bulk insert chunk size.
             progress_callback: Callback function called as: callback(stage_name, processed_rows_count).
         """
+        logger.info("Starting database seeding...")
         from sqlalchemy.orm import declarative_base
         TempBase = declarative_base()
         models = build_models(TempBase, self.config)
@@ -250,6 +254,7 @@ class NusantaraSeeder:
             
         if progress_callback:
             progress_callback("villages_end", total_villages)
+        logger.info("Database seeding completed.")
 
     def _bulk_insert(self, model_class: Any, records: List[Dict[str, Any]], batch_size: int) -> None:
         """Perform bulk insertion using SQLAlchemy Core inserts for speed."""
@@ -257,6 +262,7 @@ class NusantaraSeeder:
             return
 
         table = model_class.__table__
+        logger.info(f"Bulk inserting {len(records)} records into {table.name}...")
         for i in range(0, len(records), batch_size):
             chunk = records[i : i + batch_size]
             self.session.execute(sa.insert(table), chunk)
@@ -285,6 +291,7 @@ class NusantaraSeeder:
             resolved_cache_dir = get_default_cache_dir()
 
         storage_type = boundaries_cfg.get("type", "spatial")
+        verify_checksum = boundaries_cfg.get("verify_checksum", True)
         engine = self.session.bind
         driver_name = engine.dialect.name
 
@@ -293,6 +300,8 @@ class NusantaraSeeder:
             placeholder = "geometry::STGeomFromText(:wkt, 4326)"
         elif "postgresql" in driver_name:
             placeholder = "ST_GeomFromText(:wkt, 4326)"
+
+        logger.info(f"Seeding boundaries from cache directory: {resolved_cache_dir}")
 
         for level in levels:
             table_name = self.config.get_table_name(level)
@@ -310,12 +319,14 @@ class NusantaraSeeder:
                 from py_nusantara.manifest import Manifest
                 village_files = sorted([k for k in Manifest.HASHES.keys() if k.startswith("villages_")])
                 total_villages = 0
-                batch = []
                 for filename in village_files:
                     filepath = resolved_cache_dir / filename
                     if not filepath.exists():
                         continue
                     
+                    if verify_checksum:
+                        Manifest.verify(filepath)
+
                     seeded = self._seed_boundary_file(
                         filepath, table_name, id_col, boundary_col,
                         storage_type, placeholder, force, batch_size
@@ -330,6 +341,10 @@ class NusantaraSeeder:
                 filepath = resolved_cache_dir / filename
                 if not filepath.exists():
                     raise DataNotFoundError(f"Boundary file not found in cache: {filepath}. Run download_boundaries first.")
+
+                if verify_checksum:
+                    from py_nusantara.manifest import Manifest
+                    Manifest.verify(filepath)
 
                 seeded = self._seed_boundary_file(
                     filepath, table_name, id_col, boundary_col,
@@ -353,11 +368,15 @@ class NusantaraSeeder:
         seeded_count = 0
         batch_params = []
 
-        # Form SQL statement
+        # Form SQL statement with conditional updates for non-forced runs (N+1 query optimization)
+        where_clause = f"WHERE {id_col} = :id"
+        if not force:
+            where_clause += f" AND {boundary_col} IS NULL"
+
         if storage_type == "spatial":
-            sql = f"UPDATE {table_name} SET {boundary_col} = {placeholder} WHERE {id_col} = :id"
+            sql = f"UPDATE {table_name} SET {boundary_col} = {placeholder} {where_clause}"
         else:
-            sql = f"UPDATE {table_name} SET {boundary_col} = :boundary WHERE {id_col} = :id"
+            sql = f"UPDATE {table_name} SET {boundary_col} = :boundary {where_clause}"
 
         stmt = sa.text(sql)
 
@@ -377,13 +396,6 @@ class NusantaraSeeder:
 
                 if not row_id or not boundary_json:
                     continue
-
-                # If not forced, skip updating if boundary already exists in database
-                if not force:
-                    check_stmt = sa.text(f"SELECT 1 FROM {table_name} WHERE {id_col} = :id AND {boundary_col} IS NOT NULL")
-                    exists = self.session.execute(check_stmt, {"id": row_id}).scalar()
-                    if exists:
-                        continue
 
                 if storage_type == "spatial":
                     wkt = json_to_wkt(boundary_json)

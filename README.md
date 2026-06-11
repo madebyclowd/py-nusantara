@@ -9,6 +9,7 @@ Designed for both backend backend integrations (with SQLAlchemy) and **data scie
 ## ⚡ Key Features
 
 * **Zero-DB Mode**: Load, query, and search regions directly from memory using gzipped CSV datasets—no database connection required.
+* **Reverse Geocoding**: Resolve `(latitude, longitude)` coordinates directly to Province, Regency, District, and Village hierarchies using point-in-polygon boundary matching with Haversine distance fallback.
 * **On-Demand Boundaries (GIS)**: Keep the package size tiny. High-resolution geographic boundary coordinates (polygons/multipolygons) are downloaded only when you ask for them.
 * **Data Science Ready**: Convert records directly to Pandas or Polars DataFrames using simple helpers (e.g. `provinces_df()`).
 * **Complete Schema Freedom**: Custom table names and column renames matching your corporate schema guidelines.
@@ -72,6 +73,29 @@ if villages:
 # 4. Search regions dynamically across all levels
 results = nus.search("Bakongan")
 # Returns: {"provinces": [], "regencies": [], "districts": [...], "villages": [...]}
+```
+
+---
+
+## 📍 Reverse Geocoding (Coordinate Resolution)
+
+Resolve any `(latitude, longitude)` coordinate into the corresponding administrative hierarchy (Province, Regency, District, Village).
+
+If boundaries are downloaded and enabled, it performs a point-in-polygon containing check. If boundaries are missing or the coordinate lies slightly outside the exact borders, it falls back to finding the nearest centroid using the Haversine formula.
+
+```python
+import py_nusantara as nus
+
+# 1. Resolve containing regions (falls back to nearest centroids by default)
+regions = nus.find_by_coordinate(latitude=-6.1751, longitude=106.8650)
+
+print(regions["province"])  # ProvinceRecord (DKI Jakarta)
+print(regions["regency"])   # RegencyRecord (Kota Jakarta Pusat)
+print(regions["district"])  # DistrictRecord
+print(regions["village"])   # VillageRecord
+
+# 2. Disable centroid distance fallback (only returns exact boundary containment matches)
+exact_regions = nus.find_by_coordinate(-6.1751, 106.8650, fallback_to_nearest=False)
 ```
 
 ---
@@ -188,6 +212,12 @@ To run the test suite:
 ```bash
 uv run pytest
 ```
+
+---
+
+## 🤝 Credits
+
+* Special thanks to [cahyadsn](https://github.com/cahyadsn) for curating and providing the raw Indonesia administrative data used as the source for this package's dataset.
 
 ---
 

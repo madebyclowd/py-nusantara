@@ -1,7 +1,10 @@
 import time
 import json
+import logging
 from abc import ABC, abstractmethod
 from typing import Any, Callable, Dict, Optional, Tuple
+
+logger = logging.getLogger("py_nusantara")
 
 
 class BaseCache(ABC):
@@ -70,8 +73,9 @@ class InMemoryCache(BaseCache):
 class RedisCache(BaseCache):
     """Redis-backed cache with TTL support."""
 
-    def __init__(self, redis_url: str) -> None:
+    def __init__(self, redis_url: str, prefix: Optional[str] = None) -> None:
         self.redis_url = redis_url
+        self.prefix = prefix
         try:
             import redis
             self._client = redis.from_url(redis_url, decode_responses=True)
@@ -86,21 +90,30 @@ class RedisCache(BaseCache):
             val = self._client.get(key)
             if val is not None:
                 return json.loads(val)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Redis cache get failed for key '{key}': {e}")
         return None
 
     def set(self, key: str, value: Any, ttl: int) -> None:
         try:
             serialized = json.dumps(value)
             self._client.setex(key, ttl, serialized)
-        except Exception:
-            pass
+        except Exception as e:
+            logger.debug(f"Redis cache set failed for key '{key}': {e}")
 
     def clear(self) -> None:
         try:
-            # Note: clears only keys matching the connection context if possible, 
-            # but to flush everything cleanly:
-            self._client.flushdb()
-        except Exception:
-            pass
+            if self.prefix:
+                batch = []
+                for key in self._client.scan_iter(match=f"{self.prefix}.*"):
+                    batch.append(key)
+                    if len(batch) >= 500:
+                        self._client.delete(*batch)
+                        batch = []
+                if batch:
+                    self._client.delete(*batch)
+            else:
+                logger.warning("No prefix configured for RedisCache. Performing full database flush.")
+                self._client.flushdb()
+        except Exception as e:
+            logger.error(f"Failed to clear Redis cache: {e}")

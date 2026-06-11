@@ -1,5 +1,11 @@
 from typing import Any, Dict, List, Optional, Union
 from pathlib import Path
+import logging
+import threading
+
+# Initialize package logger
+logger = logging.getLogger("py_nusantara")
+
 from py_nusantara.config import NusantaraConfig
 from py_nusantara.exceptions import (
     NusantaraError,
@@ -19,6 +25,7 @@ from py_nusantara.reader import NusantaraReader
 from py_nusantara.search import NusantaraSearch
 from py_nusantara.db import build_models, NusantaraSeeder
 from py_nusantara.downloader import download_boundaries as _download_boundaries, json_to_wkt
+from py_nusantara.spatial import is_point_in_boundary, haversine_distance
 
 __all__ = [
     "Nusantara",
@@ -46,6 +53,7 @@ __all__ = [
     "find_village",
     "search",
     "clear_cache",
+    "find_by_coordinate",
     "provinces_df",
     "regencies_df",
     "districts_df",
@@ -65,7 +73,7 @@ class Nusantara:
         if not self.config.cache_enabled:
             self.cache = NoCache()
         elif self.config.redis_url:
-            self.cache = RedisCache(self.config.redis_url)
+            self.cache = RedisCache(self.config.redis_url, prefix=self.config.cache_prefix)
         else:
             self.cache = InMemoryCache()
 
@@ -190,6 +198,113 @@ class Nusantara:
             _execute_search
         )
 
+    def find_by_coordinate(
+        self,
+        latitude: float,
+        longitude: float,
+        fallback_to_nearest: bool = True,
+    ) -> Dict[str, Optional[BaseRecord]]:
+        """Resolve administrative regions (province, regency, district, village) containing the coordinate.
+        
+        If no exact boundary matches, can fallback to the nearest centroid.
+        """
+        prefix = self.config.cache_prefix
+        ttl = self.config.cache_ttl
+        
+        def _execute_resolve():
+            res: Dict[str, Optional[BaseRecord]] = {
+                "province": None,
+                "regency": None,
+                "district": None,
+                "village": None,
+            }
+            
+            def _find_nearest(records: List[Any]) -> Optional[Any]:
+                nearest = None
+                min_dist = float("inf")
+                for r in records:
+                    r_lat = getattr(r, "latitude", None)
+                    r_lon = getattr(r, "longitude", None)
+                    if r_lat is not None and r_lon is not None:
+                        try:
+                            dist = haversine_distance(latitude, longitude, float(r_lat), float(r_lon))
+                            if dist < min_dist:
+                                min_dist = dist
+                                nearest = r
+                        except (ValueError, TypeError):
+                            pass
+                return nearest
+
+            # 1. Resolve Province
+            prov_records = self.provinces()
+            matched_prov = None
+            
+            for p in prov_records:
+                boundary_val = getattr(p, "boundary", None)
+                if boundary_val and is_point_in_boundary(latitude, longitude, boundary_val):
+                    matched_prov = p
+                    break
+                    
+            if not matched_prov and fallback_to_nearest:
+                matched_prov = _find_nearest(prov_records)
+                
+            if not matched_prov:
+                return res
+            res["province"] = matched_prov
+
+            # 2. Resolve Regency
+            reg_records = self.regencies_of(matched_prov.id)
+            matched_reg = None
+            for r in reg_records:
+                boundary_val = getattr(r, "boundary", None)
+                if boundary_val and is_point_in_boundary(latitude, longitude, boundary_val):
+                    matched_reg = r
+                    break
+                    
+            if not matched_reg and fallback_to_nearest:
+                matched_reg = _find_nearest(reg_records)
+                
+            if not matched_reg:
+                return res
+            res["regency"] = matched_reg
+
+            # 3. Resolve District
+            dist_records = self.districts_of(matched_reg.id)
+            matched_dist = None
+            for d in dist_records:
+                boundary_val = getattr(d, "boundary", None)
+                if boundary_val and is_point_in_boundary(latitude, longitude, boundary_val):
+                    matched_dist = d
+                    break
+                    
+            if not matched_dist and fallback_to_nearest:
+                matched_dist = _find_nearest(dist_records)
+                
+            if not matched_dist:
+                return res
+            res["district"] = matched_dist
+
+            # 4. Resolve Village
+            vil_records = self.villages_of(matched_dist.id)
+            matched_vil = None
+            for v in vil_records:
+                boundary_val = getattr(v, "boundary", None)
+                if boundary_val and is_point_in_boundary(latitude, longitude, boundary_val):
+                    matched_vil = v
+                    break
+                    
+            if not matched_vil and fallback_to_nearest:
+                matched_vil = _find_nearest(vil_records)
+                
+            res["village"] = matched_vil
+            return res
+
+        return self.cache.remember(
+            f"{prefix}.coord.{latitude}.{longitude}.{fallback_to_nearest}",
+            ttl,
+            _execute_resolve
+        )
+
     def clear_cache(self) -> None:
         """Clear all cached queries."""
         self.cache.clear()
@@ -242,12 +357,15 @@ class Nusantara:
 
 # --- Default Shared Instance (Singleton-like facade shortcut) ---
 _global_instance: Optional[Nusantara] = None
+_instance_lock = threading.Lock()
 
 
 def _get_instance() -> Nusantara:
     global _global_instance
     if _global_instance is None:
-        _global_instance = Nusantara()
+        with _instance_lock:
+            if _global_instance is None:
+                _global_instance = Nusantara()
     return _global_instance
 
 
@@ -292,6 +410,14 @@ def find_village(id: str) -> Optional[VillageRecord]:
 
 def search(query: str, limit: int = 20) -> Dict[str, List[BaseRecord]]:
     return _get_instance().search(query, limit)
+
+
+def find_by_coordinate(
+    latitude: float,
+    longitude: float,
+    fallback_to_nearest: bool = True,
+) -> Dict[str, Optional[BaseRecord]]:
+    return _get_instance().find_by_coordinate(latitude, longitude, fallback_to_nearest)
 
 
 def clear_cache() -> None:

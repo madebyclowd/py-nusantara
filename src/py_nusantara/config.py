@@ -65,7 +65,7 @@ class NusantaraConfig:
             "redis_url": None, # e.g. "redis://localhost:6379/0"
         },
         "boundaries": {
-            "cdn_url": "https://github.com/madebyclowd/laravel-nusantara/releases/download",
+            "cdn_url": "https://data.clowdlab.com",
             "local_path": None,
             "version": "v1.1.0",
             "type": "spatial",  # "spatial" or "text"

@@ -43,6 +43,7 @@ from py_nusantara.utils import (
     format_region_code,
     validate_region_code,
 )
+from py_nusantara.historical import resolve_legacy_id
 
 __all__ = [
     "Nusantara",
@@ -87,6 +88,7 @@ __all__ = [
     "format_region_code",
     "validate_region_code",
     "find_nearby",
+    "resolve_legacy_id",
 ]
 
 
@@ -140,12 +142,16 @@ class Nusantara:
         )
 
     def find_regency(self, id: str) -> Optional[RegencyRecord]:
-        """Fetch a specific regency by ID."""
+        """Fetch a specific regency by ID, falling back to historical mapping if obsolete."""
         prov_id = id[:2]
         id_col = self.config.resolve_column_name("regencies", "id")
         for r in self.regencies_of(prov_id):
             if getattr(r, id_col) == id:
                 return r
+        # Fallback to historical mapping
+        active_id = resolve_legacy_id(id)
+        if active_id != id:
+            return self.find_regency(active_id)
         return None
 
     def districts_of(self, regency_id: str) -> List[DistrictRecord]:
@@ -164,12 +170,16 @@ class Nusantara:
         )
 
     def find_district(self, id: str) -> Optional[DistrictRecord]:
-        """Fetch a specific district by ID."""
+        """Fetch a specific district by ID, falling back to historical mapping if obsolete."""
         reg_id = id[:4]
         id_col = self.config.resolve_column_name("districts", "id")
         for d in self.districts_of(reg_id):
             if getattr(d, id_col) == id:
                 return d
+        # Fallback to historical mapping
+        active_id = resolve_legacy_id(id)
+        if active_id != id:
+            return self.find_district(active_id)
         return None
 
     def villages_of(self, district_id: str) -> List[VillageRecord]:
@@ -199,12 +209,16 @@ class Nusantara:
         )
 
     def find_village(self, id: str) -> Optional[VillageRecord]:
-        """Fetch a specific village by ID."""
+        """Fetch a specific village by ID, falling back to historical mapping if obsolete."""
         dist_id = id[:6]
         id_col = self.config.resolve_column_name("villages", "id")
         for v in self.villages_of(dist_id):
             if getattr(v, id_col) == id:
                 return v
+        # Fallback to historical mapping
+        active_id = resolve_legacy_id(id)
+        if active_id != id:
+            return self.find_village(active_id)
         return None
 
     def search(
@@ -598,6 +612,13 @@ def find_nearby(
     latitude: float, longitude: float, radius_km: float, level: str = "villages"
 ) -> List[BaseRecord]:
     return _get_instance().find_nearby(latitude, longitude, radius_km, level=level)
+
+
+# Historical mapping shortcut
+def resolve_legacy_id(region_id: str) -> str:
+    """Map legacy/obsolete regional ID to the current active ID."""
+    from py_nusantara.historical import resolve_legacy_id as _resolve
+    return _resolve(region_id)
 
 
 

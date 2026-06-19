@@ -28,24 +28,36 @@ class NIKInfo:
 
     @property
     def province(self) -> Optional[Any]:
-        """Retrieve the ProvinceRecord matching this NIK's province code, if facade is available."""
+        """Retrieve the ProvinceRecord matching this NIK's province code, checking legacy map."""
         if not self._facade:
             return None
+        dist = self.district
+        if dist:
+            return dist.province
         return self._facade.find_province(self.province_id)
 
     @property
     def regency(self) -> Optional[Any]:
-        """Retrieve the RegencyRecord matching this NIK's regency code, if facade is available."""
+        """Retrieve the RegencyRecord matching this NIK's regency code, checking legacy map."""
         if not self._facade:
             return None
+        dist = self.district
+        if dist:
+            return dist.regency
         return self._facade.find_regency(self.regency_id)
 
     @property
     def district(self) -> Optional[Any]:
-        """Retrieve the DistrictRecord matching this NIK's district code, if facade is available."""
+        """Retrieve the DistrictRecord matching this NIK's district code, checking legacy map."""
         if not self._facade:
             return None
-        return self._facade.find_district(self.district_id)
+        record = self._facade.find_district(self.district_id)
+        if not record:
+            from py_nusantara.historical import resolve_legacy_id
+            active_id = resolve_legacy_id(self.district_id)
+            if active_id != self.district_id:
+                record = self._facade.find_district(active_id)
+        return record
 
     def to_dict(self) -> Dict[str, Any]:
         """Return the parsed NIK information as a dictionary."""

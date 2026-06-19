@@ -178,6 +178,14 @@ class DistrictRecord(BaseRecord):
             return []
         return self._facade.villages_of(self.id)
 
+    @property
+    def localized_type(self) -> str:
+        """Return the localized administrative type name (e.g. Kecamatan, Kapanewon, Kemantren)."""
+        prov_id = self.id[:2]
+        if prov_id == "34":  # Yogyakarta Special Region (DIY)
+            return "Kemantren" if self.id.startswith("3471") else "Kapanewon"
+        return "Kecamatan"
+
 
 class VillageRecord(BaseRecord):
     """Wrapper for a Village record."""
@@ -203,4 +211,33 @@ class VillageRecord(BaseRecord):
         if not self._facade:
             return None
         return self._facade.find_province(self.id[:2])
+
+    @property
+    def is_kelurahan(self) -> bool:
+        """Return True if this village is officially a Kelurahan (urban village)."""
+        id_val = getattr(self, "id", "")
+        return len(id_val) >= 7 and id_val[6] == "1"
+
+    @property
+    def is_desa(self) -> bool:
+        """Return True if this village is officially a Desa (rural village)."""
+        id_val = getattr(self, "id", "")
+        return len(id_val) >= 7 and id_val[6] == "2"
+
+    @property
+    def type(self) -> str:
+        """Return 'Kelurahan' if this is a Kelurahan, else 'Desa'."""
+        return "Kelurahan" if self.is_kelurahan else "Desa"
+
+    @property
+    def localized_type(self) -> str:
+        """Return the localized administrative type name based on province."""
+        prov_id = self.id[:2]
+        if prov_id == "11":
+            return "Gampong"  # Aceh
+        if prov_id == "13":
+            return "Nagari"   # West Sumatra
+        if prov_id in ("91", "92", "93", "94", "95", "96"):
+            return "Kampung"  # Papua provinces
+        return self.type
 

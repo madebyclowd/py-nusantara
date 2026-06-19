@@ -745,6 +745,111 @@ def test_spatial_and_gis_helpers():
         assert v.distance_km <= 50.0
 
 
+def test_village_classification():
+    # 1. Kelurahan test (digit 7 = 1)
+    from py_nusantara import VillageRecord
+    from py_nusantara.config import NusantaraConfig
+    cfg = NusantaraConfig()
+    
+    # Kelurahan: 1201011001 (7th char is 1)
+    kelurahan = VillageRecord({"id": "1201011001", "name": "Pasar Batu Gerigis"}, cfg)
+    assert kelurahan.is_kelurahan is True
+    assert kelurahan.is_desa is False
+    assert kelurahan.type == "Kelurahan"
+    
+    # Desa: 1101012001 (7th char is 2)
+    desa = VillageRecord({"id": "1101012001", "name": "Keude Bakongan"}, cfg)
+    assert desa.is_kelurahan is False
+    assert desa.is_desa is True
+    assert desa.type == "Desa"
+
+
+def test_localized_nomenclature():
+    from py_nusantara import VillageRecord, DistrictRecord
+    from py_nusantara.config import NusantaraConfig
+    cfg = NusantaraConfig()
+
+    # Village in Aceh (Province 11) -> Gampong
+    v_aceh = VillageRecord({"id": "1101012001", "name": "Keude Bakongan"}, cfg)
+    assert v_aceh.localized_type == "Gampong"
+
+    # Village in West Sumatra (Province 13) -> Nagari
+    v_sumbar = VillageRecord({"id": "1301012001", "name": "Musi"}, cfg)
+    assert v_sumbar.localized_type == "Nagari"
+
+    # Village in Papua (Province 91) -> Kampung
+    v_papua = VillageRecord({"id": "9101012001", "name": "A"}, cfg)
+    assert v_papua.localized_type == "Kampung"
+
+    # Village in West Java (Province 32) -> Desa (standard)
+    v_jabar = VillageRecord({"id": "3201012001", "name": "B"}, cfg)
+    assert v_jabar.localized_type == "Desa"
+
+    # District in Yogyakarta City (3471...) -> Kemantren
+    d_jogja_city = DistrictRecord({"id": "347101", "name": "Danurejan"}, cfg)
+    assert d_jogja_city.localized_type == "Kemantren"
+
+    # District in Yogyakarta Regency Bantul (3402...) -> Kapanewon
+    d_jogja_reg = DistrictRecord({"id": "340201", "name": "Srandakan"}, cfg)
+    assert d_jogja_reg.localized_type == "Kapanewon"
+
+    # District in Jakarta (3171...) -> Kecamatan (standard)
+    d_jakarta = DistrictRecord({"id": "317101", "name": "Menteng"}, cfg)
+    assert d_jakarta.localized_type == "Kecamatan"
+
+
+def test_historical_split_mapping_and_resolution():
+    from py_nusantara import resolve_legacy_id, parse_nik, find_regency, find_district, find_village
+    
+    # Test resolve_legacy_id direct mapping
+    assert resolve_legacy_id("9101") == "9301"  # Merauke: old Papua -> Papua Selatan
+    assert resolve_legacy_id("910101") == "930101"
+    assert resolve_legacy_id("9101012001") == "9301012001"
+    assert resolve_legacy_id("1101") == "1101"  # Non-split unchanged
+
+    # Test transparent lookup fallback through facade
+    # 9101 is Merauke (old Papua). In our active dataset, Merauke is 9301.
+    merauke_regency = find_regency("9101")
+    assert merauke_regency is not None
+    assert merauke_regency.id == "9301"
+    assert merauke_regency.name == "Kabupaten Merauke"
+
+    # Test district lookup fallback
+    merauke_district = find_district("910101")
+    assert merauke_district is not None
+    assert merauke_district.id == "930101"
+    assert merauke_district.name == "Merauke"
+
+    # Test village lookup fallback
+    samkai_village = find_village("9101011002")
+    assert samkai_village is not None
+    assert samkai_village.id == "9301011002"
+    assert samkai_village.name == "Samkai"
+    assert samkai_village.is_kelurahan is True
+
+    # Test legacy NIK resolution
+    # Legacy NIK: starts with 910101 (Merauke District, Papua)
+    legacy_nik = "9101010402020001"
+    info = parse_nik(legacy_nik)
+    assert info.province_id == "91"
+    assert info.regency_id == "9101"
+    assert info.district_id == "910101"
+    
+    # These should resolve to active records in Papua Selatan / Merauke
+    assert info.province is not None
+    assert info.province.id == "93"
+    assert info.province.name == "Papua Selatan"
+    
+    assert info.regency is not None
+    assert info.regency.id == "9301"
+    assert info.regency.name == "Kabupaten Merauke"
+    
+    assert info.district is not None
+    assert info.district.id == "930101"
+    assert info.district.name == "Merauke"
+
+
+
 
 
 

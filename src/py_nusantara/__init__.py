@@ -12,6 +12,8 @@ from py_nusantara.exceptions import (
     ConfigurationError,
     IntegrityError,
     DataNotFoundError,
+    NIKValidationError,
+    PostalCodeValidationError,
 )
 from py_nusantara.cache import NoCache, InMemoryCache, RedisCache
 from py_nusantara.records import (
@@ -26,6 +28,16 @@ from py_nusantara.search import NusantaraSearch
 from py_nusantara.db import build_models, NusantaraSeeder
 from py_nusantara.downloader import download_boundaries as _download_boundaries, json_to_wkt
 from py_nusantara.spatial import is_point_in_boundary, haversine_distance
+from py_nusantara.nik import (
+    NIKInfo,
+    parse_nik as _parse_nik,
+    validate_nik as _validate_nik,
+)
+from py_nusantara.postal_code import (
+    PostalCodeInfo,
+    parse_postal_code as _parse_postal_code,
+    validate_postal_code as _validate_postal_code,
+)
 
 __all__ = [
     "Nusantara",
@@ -33,6 +45,10 @@ __all__ = [
     "ConfigurationError",
     "IntegrityError",
     "DataNotFoundError",
+    "NIKValidationError",
+    "NIKInfo",
+    "PostalCodeValidationError",
+    "PostalCodeInfo",
     "BaseRecord",
     "ProvinceRecord",
     "RegencyRecord",
@@ -58,6 +74,10 @@ __all__ = [
     "regencies_df",
     "districts_df",
     "villages_df",
+    "parse_nik",
+    "validate_nik",
+    "parse_postal_code",
+    "validate_postal_code",
 ]
 
 
@@ -354,6 +374,36 @@ class Nusantara:
         import pandas as pd
         return pd.DataFrame([v.to_dict(logical) for v in self.villages_of(district_id)])
 
+    def parse_nik(self, nik: str, reference_year: Optional[int] = None) -> NIKInfo:
+        """Parse Nomor Induk Kependudukan (NIK) and resolve its location using this instance."""
+        return _parse_nik(nik, reference_year=reference_year, facade_ref=self)
+
+    def validate_nik(self, nik: str, reference_year: Optional[int] = None) -> bool:
+        """Validate if the given NIK is syntactically valid."""
+        return _validate_nik(nik, reference_year=reference_year)
+
+    def parse_postal_code(self, postal_code: str) -> PostalCodeInfo:
+        """Parse postal code and resolve its administrative region hierarchy using this instance (cached)."""
+        cleaned_code = postal_code.strip()
+        if not self.validate_postal_code(cleaned_code):
+            raise PostalCodeValidationError(
+                f"Invalid postal code format: '{postal_code}'. "
+                "Must be exactly 5 numeric digits and cannot start with '0'."
+            )
+        prefix = self.config.cache_prefix
+        ttl = self.config.cache_ttl
+        return self.cache.remember(
+            f"{prefix}.postal_code.{cleaned_code}",
+            ttl,
+            lambda: _parse_postal_code(cleaned_code, facade_ref=self)
+        )
+
+    def validate_postal_code(self, postal_code: str) -> bool:
+        """Validate if the given postal code is a syntactically valid Indonesian postal code."""
+        return _validate_postal_code(postal_code)
+
+
+
 
 # --- Default Shared Instance (Singleton-like facade shortcut) ---
 _global_instance: Optional[Nusantara] = None
@@ -460,3 +510,23 @@ def districts_df(regency_id: str, logical: bool = True) -> Any:
 
 def villages_df(district_id: str, logical: bool = True) -> Any:
     return _get_instance().villages_df(district_id, logical)
+
+
+# NIK Shortcuts
+def parse_nik(nik: str, reference_year: Optional[int] = None) -> NIKInfo:
+    return _get_instance().parse_nik(nik, reference_year=reference_year)
+
+
+def validate_nik(nik: str, reference_year: Optional[int] = None) -> bool:
+    return _get_instance().validate_nik(nik, reference_year=reference_year)
+
+
+# Postal Code Shortcuts
+def parse_postal_code(postal_code: str) -> PostalCodeInfo:
+    return _get_instance().parse_postal_code(postal_code)
+
+
+def validate_postal_code(postal_code: str) -> bool:
+    return _get_instance().validate_postal_code(postal_code)
+
+

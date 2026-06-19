@@ -16,3 +16,15 @@ class IntegrityError(NusantaraError):
 class DataNotFoundError(NusantaraError):
     """Raised when requested data or dataset files cannot be found."""
     pass
+
+
+class NIKValidationError(NusantaraError):
+    """Raised when NIK validation fails."""
+    pass
+
+
+class PostalCodeValidationError(NusantaraError):
+    """Raised when Postal Code validation fails."""
+    pass
+
+

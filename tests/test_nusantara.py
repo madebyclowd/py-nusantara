@@ -20,6 +20,14 @@ from py_nusantara import (
     build_models,
     NusantaraSeeder,
     json_to_wkt,
+    NIKValidationError,
+    NIKInfo,
+    parse_nik,
+    validate_nik,
+    PostalCodeValidationError,
+    PostalCodeInfo,
+    parse_postal_code,
+    validate_postal_code,
 )
 
 
@@ -459,5 +467,152 @@ def test_find_by_coordinate_exact_boundary(tmp_path):
     assert res["district"].name == "Bakongan"
     assert res["village"] is not None
     assert res["village"].name == "Keude Bakongan"
+
+
+def test_nik_validation_and_parsing():
+    import datetime
+    
+    # 1. Valid Male NIK (Bakongan, Aceh, born 4 Feb 2002)
+    nik_male = "1101010402020001"
+    assert validate_nik(nik_male) is True
+    
+    info = parse_nik(nik_male)
+    assert isinstance(info, NIKInfo)
+    assert info.nik == nik_male
+    assert info.province_id == "11"
+    assert info.regency_id == "1101"
+    assert info.district_id == "110101"
+    assert info.gender == "male"
+    assert info.birth_date == datetime.date(2002, 2, 4)
+    assert info.sequence == "0001"
+    
+    # Check regional resolution
+    assert info.province is not None
+    assert info.province.name == "Aceh"
+    assert info.regency is not None
+    assert info.regency.name == "Kabupaten Aceh Selatan"
+    assert info.district is not None
+    assert info.district.name == "Bakongan"
+    
+    # 2. Valid Female NIK (same birth date, female day = 4 + 40 = 44)
+    nik_female = "1101014402020001"
+    assert validate_nik(nik_female) is True
+    
+    info_female = parse_nik(nik_female)
+    assert info_female.gender == "female"
+    assert info_female.birth_date == datetime.date(2002, 2, 4)
+
+    # 3. Invalid NIK: Format checks
+    assert validate_nik("110101040202000") is False  # Too short
+    assert validate_nik("11010104020200011") is False # Too long
+    assert validate_nik("110101040202000A") is False  # Non-numeric
+    
+    with pytest.raises(NIKValidationError, match="exactly 16 characters"):
+        parse_nik("110101040202000")
+        
+    with pytest.raises(NIKValidationError, match="only numeric digits"):
+        parse_nik("110101040202000A")
+
+    # 4. Invalid NIK: Sub-codes and ranges
+    assert validate_nik("0001010402020001") is False  # Province '00'
+    assert validate_nik("1100010402020001") is False  # Regency '00'
+    assert validate_nik("1101000402020001") is False  # District '00'
+    assert validate_nik("1101010402020000") is False  # Sequence '0000'
+    
+    with pytest.raises(NIKValidationError, match="Province code cannot be '00'"):
+        parse_nik("0001010402020001")
+
+    # 5. Invalid NIK: Birth Date validation
+    assert validate_nik("1101013202020001") is False  # Day 32
+    assert validate_nik("1101010413020001") is False  # Month 13
+    assert validate_nik("1101013104020001") is False  # April 31st
+    assert validate_nik("1101012902030001") is False  # Feb 29 on non-leap year (2003)
+    
+    # Valid leap year date
+    assert validate_nik("1101012902040001") is True   # Feb 29 on leap year (2004)
+
+    # 6. Century threshold heuristic
+    # reference year = 2026
+    # '26' -> 2026
+    info_26 = parse_nik("1101010402260001", reference_year=2026)
+    assert info_26.birth_date.year == 2026
+    
+    # '27' -> 1927 (since 2027 > 2026)
+    info_27 = parse_nik("1101010402270001", reference_year=2026)
+    assert info_27.birth_date.year == 1927
+
+    # 7. Unregistered / Unknown regional codes (should parse details but return None for records)
+    nik_unknown = "9999990402020001"
+    assert validate_nik(nik_unknown) is True
+    
+    info_unknown = parse_nik(nik_unknown)
+    assert info_unknown.province_id == "99"
+    assert info_unknown.regency_id == "9999"
+    assert info_unknown.district_id == "999999"
+    assert info_unknown.gender == "male"
+    assert info_unknown.birth_date == datetime.date(2002, 2, 4)
+    
+    # Since codes 999999 do not exist in the database:
+    assert info_unknown.province is None
+    assert info_unknown.regency is None
+    assert info_unknown.district is None
+
+
+def test_postal_code_validation_and_parsing():
+    # 1. Valid validation
+    assert validate_postal_code("23773") is True
+    assert validate_postal_code("12345") is True
+    
+    # 2. Invalid validation
+    assert validate_postal_code("1234") is False   # Too short
+    assert validate_postal_code("123456") is False # Too long
+    assert validate_postal_code("1234a") is False  # Non-numeric
+    assert validate_postal_code("01234") is False  # Starts with 0
+    assert validate_postal_code(None) is False     # Non-string
+    
+    # 3. Exception raising
+    with pytest.raises(PostalCodeValidationError, match="Must be exactly 5 numeric digits"):
+        parse_postal_code("1234")
+        
+    with pytest.raises(PostalCodeValidationError, match="cannot start with '0'"):
+        parse_postal_code("01234")
+
+    # 4. Valid lookup & resolution (using real postal code '23773' from Keude Bakongan)
+    clear_cache()
+    info = parse_postal_code("23773")
+    assert isinstance(info, PostalCodeInfo)
+    assert info.postal_code == "23773"
+    assert len(info.villages) > 0
+    
+    # Verify Keude Bakongan is found
+    names = [v.name for v in info.villages]
+    assert "Keude Bakongan" in names
+    
+    # Verify parents resolved
+    assert len(info.districts) > 0
+    assert info.districts[0].name == "Bakongan"
+    
+    assert len(info.regencies) > 0
+    assert info.regencies[0].name == "Kabupaten Aceh Selatan"
+    
+    assert len(info.provinces) > 0
+    assert info.provinces[0].name == "Aceh"
+    
+    # Verify dictionary export
+    d = info.to_dict()
+    assert d["postal_code"] == "23773"
+    assert len(d["villages"]) > 0
+    assert d["villages"][0]["name"] == "Keude Bakongan"
+    assert d["districts"][0]["name"] == "Bakongan"
+
+    # 5. Non-existent but valid format
+    info_none = parse_postal_code("99999")
+    assert info_none.postal_code == "99999"
+    assert len(info_none.villages) == 0
+    assert len(info_none.districts) == 0
+    assert len(info_none.regencies) == 0
+    assert len(info_none.provinces) == 0
+
+
 
 

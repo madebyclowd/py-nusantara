@@ -86,6 +86,7 @@ __all__ = [
     "clean_region_code",
     "format_region_code",
     "validate_region_code",
+    "find_nearby",
 ]
 
 
@@ -418,6 +419,49 @@ class Nusantara:
         """Validate if the given postal code is a syntactically valid Indonesian postal code."""
         return _validate_postal_code(postal_code)
 
+    def find_nearby(
+        self, latitude: float, longitude: float, radius_km: float, level: str = "villages"
+    ) -> List[BaseRecord]:
+        """Find all regions of a specific level within the given radius (in kilometers) of a coordinate."""
+        if level not in ("provinces", "regencies", "districts", "villages"):
+            raise ValueError("level must be one of: provinces, regencies, districts, villages")
+
+        records: List[BaseRecord] = []
+        if level == "provinces":
+            records = self.provinces()
+        elif level == "regencies":
+            records = [RegencyRecord(r, self.config, self) for r in self.reader.read_regencies()]
+        elif level == "districts":
+            records = [DistrictRecord(r, self.config, self) for r in self.reader.read_districts()]
+        elif level == "villages":
+            # Optimization: prune by province centroid distance
+            target_provinces = []
+            for p in self.provinces():
+                p_lat, p_lon = getattr(p, "latitude", None), getattr(p, "longitude", None)
+                if p_lat is not None and p_lon is not None:
+                    dist = haversine_distance(latitude, longitude, p_lat, p_lon)
+                    if dist <= radius_km + 250.0:
+                        target_provinces.append(p.id)
+            
+            if not target_provinces:
+                target_provinces = [p.id for p in self.provinces()]
+                
+            for prov_id in target_provinces:
+                records.extend(self.villages_of_province(prov_id))
+
+        results = []
+        for r in records:
+            r_lat, r_lon = getattr(r, "latitude", None), getattr(r, "longitude", None)
+            if r_lat is not None and r_lon is not None:
+                dist = haversine_distance(latitude, longitude, float(r_lat), float(r_lon))
+                if dist <= radius_km:
+                    r.distance_km = dist
+                    results.append(r)
+
+        results.sort(key=lambda x: getattr(x, "distance_km", 0.0))
+        return results
+
+
 
 
 
@@ -547,6 +591,14 @@ def parse_postal_code(postal_code: str) -> PostalCodeInfo:
 
 def validate_postal_code(postal_code: str) -> bool:
     return _get_instance().validate_postal_code(postal_code)
+
+
+# Spatial shortcuts
+def find_nearby(
+    latitude: float, longitude: float, radius_km: float, level: str = "villages"
+) -> List[BaseRecord]:
+    return _get_instance().find_nearby(latitude, longitude, radius_km, level=level)
+
 
 
 

@@ -68,6 +68,20 @@ class BaseRecord:
         except AttributeError:
             return f"<{self.__class__.__name__} data={self._data}>"
 
+    def distance_to(self, other: "BaseRecord") -> Optional[float]:
+        """Calculate the great-circle distance to another regional record in kilometers."""
+        if not isinstance(other, BaseRecord):
+            raise TypeError("Can only calculate distance to another BaseRecord instance.")
+
+        lat1, lon1 = getattr(self, "latitude", None), getattr(self, "longitude", None)
+        lat2, lon2 = getattr(other, "latitude", None), getattr(other, "longitude", None)
+
+        if lat1 is None or lon1 is None or lat2 is None or lon2 is None:
+            return None
+
+        from py_nusantara.spatial import haversine_distance
+        return haversine_distance(lat1, lon1, lat2, lon2)
+
 
 class ProvinceRecord(BaseRecord):
     """Wrapper for a Province record."""

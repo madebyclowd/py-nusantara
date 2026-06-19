@@ -31,6 +31,7 @@ from py_nusantara import (
     clean_region_code,
     format_region_code,
     validate_region_code,
+    find_nearby,
 )
 
 
@@ -691,6 +692,58 @@ def test_region_enhancements():
     res_reg_out = search("Bakongan", scope={"regency_id": "1102"})
     assert len(res_reg_out["districts"]) == 0
     assert len(res_reg_out["villages"]) == 0
+
+
+def test_spatial_and_gis_helpers():
+    # 1. Distance Calculation (distance_to)
+    # Regency Aceh Selatan (1101) & Kota Banda Aceh (1171)
+    r1 = find_regency("1101")
+    r2 = find_regency("1171")
+    
+    assert r1 is not None
+    assert r2 is not None
+    
+    dist = r1.distance_to(r2)
+    assert isinstance(dist, float)
+    assert dist > 0.0
+    
+    # Distance to self should be 0.0
+    assert r1.distance_to(r1) == 0.0
+    
+    # TypeError check
+    with pytest.raises(TypeError):
+        r1.distance_to("not a record")
+        
+    # None return when missing coordinates
+    r1._data["latitude"] = None
+    assert r1.distance_to(r2) is None
+    
+    # Restore latitude
+    r1._data["latitude"] = "3.2"
+
+    # 2. Radial Search (find_nearby)
+    # Coordinates of Banda Aceh: lat=5.54, lon=95.32
+    nearby_provs = find_nearby(5.54, 95.32, radius_km=100.0, level="provinces")
+    assert len(nearby_provs) > 0
+    assert nearby_provs[0].name == "Aceh"
+    assert hasattr(nearby_provs[0], "distance_km")
+    assert nearby_provs[0].distance_km < 100.0
+    
+    # Sorting check (nearest first)
+    if len(nearby_provs) > 1:
+        assert nearby_provs[0].distance_km <= nearby_provs[1].distance_km
+        
+    # Invalid level check
+    with pytest.raises(ValueError, match="level must be one of"):
+        find_nearby(5.54, 95.32, radius_km=100.0, level="invalid_level")
+
+    # Pruned villages nearby search (Banda Aceh has villages starting with '11')
+    nearby_villages = find_nearby(5.54, 95.32, radius_km=50.0, level="villages")
+    assert len(nearby_villages) > 0
+    for v in nearby_villages:
+        assert v.id.startswith("11")  # Must belong to Aceh
+        assert v.distance_km <= 50.0
+
 
 
 

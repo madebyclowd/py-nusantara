@@ -38,6 +38,11 @@ from py_nusantara.postal_code import (
     parse_postal_code as _parse_postal_code,
     validate_postal_code as _validate_postal_code,
 )
+from py_nusantara.utils import (
+    clean_region_code,
+    format_region_code,
+    validate_region_code,
+)
 
 __all__ = [
     "Nusantara",
@@ -78,6 +83,9 @@ __all__ = [
     "validate_nik",
     "parse_postal_code",
     "validate_postal_code",
+    "clean_region_code",
+    "format_region_code",
+    "validate_region_code",
 ]
 
 
@@ -198,13 +206,20 @@ class Nusantara:
                 return v
         return None
 
-    def search(self, query: str, limit: int = 20) -> Dict[str, List[BaseRecord]]:
-        """Search regional names dynamically across all levels."""
+    def search(
+        self, query: str, limit: int = 20, scope: Optional[Dict[str, str]] = None
+    ) -> Dict[str, List[BaseRecord]]:
+        """Search regional names dynamically across all levels, optionally scoped to a parent region."""
         prefix = self.config.cache_prefix
         ttl = self.config.cache_ttl
         
+        # Format scope into a string key for caching uniqueness
+        scope_str = "none"
+        if scope:
+            scope_str = "_".join(f"{k}:{v}" for k, v in sorted(scope.items()))
+        
         def _execute_search():
-            raw_res = self.searcher.search(query, limit)
+            raw_res = self.searcher.search(query, limit, scope)
             return {
                 "provinces": [ProvinceRecord(r, self.config, self) for r in raw_res["provinces"]],
                 "regencies": [RegencyRecord(r, self.config, self) for r in raw_res["regencies"]],
@@ -213,10 +228,11 @@ class Nusantara:
             }
 
         return self.cache.remember(
-            f"{prefix}.search.{query}.{limit}",
+            f"{prefix}.search.{query}.{limit}.{scope_str}",
             ttl,
             _execute_search
         )
+
 
     def find_by_coordinate(
         self,
@@ -458,8 +474,11 @@ def find_village(id: str) -> Optional[VillageRecord]:
     return _get_instance().find_village(id)
 
 
-def search(query: str, limit: int = 20) -> Dict[str, List[BaseRecord]]:
-    return _get_instance().search(query, limit)
+def search(
+    query: str, limit: int = 20, scope: Optional[Dict[str, str]] = None
+) -> Dict[str, List[BaseRecord]]:
+    return _get_instance().search(query, limit, scope=scope)
+
 
 
 def find_by_coordinate(
@@ -528,5 +547,6 @@ def parse_postal_code(postal_code: str) -> PostalCodeInfo:
 
 def validate_postal_code(postal_code: str) -> bool:
     return _get_instance().validate_postal_code(postal_code)
+
 
 

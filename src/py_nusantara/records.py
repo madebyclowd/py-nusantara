@@ -127,6 +127,17 @@ class RegencyRecord(BaseRecord):
             villages.extend(district.villages)
         return villages
 
+    @property
+    def is_city(self) -> bool:
+        """Return True if this regency is officially a City (Kota)."""
+        name_val = getattr(self, "name", "")
+        return name_val.upper().startswith("KOTA")
+
+    @property
+    def type(self) -> str:
+        """Return 'Kota' if this is a City, else 'Kabupaten'."""
+        return "Kota" if self.is_city else "Kabupaten"
+
 
 class DistrictRecord(BaseRecord):
     """Wrapper for a District record."""
@@ -138,6 +149,13 @@ class DistrictRecord(BaseRecord):
         if not self._facade:
             return None
         return self._facade.find_regency(self.regency_id)
+
+    @property
+    def province(self) -> Optional[ProvinceRecord]:
+        """Get the province that owns this district."""
+        if not self._facade:
+            return None
+        return self._facade.find_province(self.id[:2])
 
     @property
     def villages(self) -> List["VillageRecord"]:
@@ -157,3 +175,18 @@ class VillageRecord(BaseRecord):
         if not self._facade:
             return None
         return self._facade.find_district(self.district_id)
+
+    @property
+    def regency(self) -> Optional[RegencyRecord]:
+        """Get the regency that owns this village."""
+        if not self._facade:
+            return None
+        return self._facade.find_regency(self.id[:4])
+
+    @property
+    def province(self) -> Optional[ProvinceRecord]:
+        """Get the province that owns this village."""
+        if not self._facade:
+            return None
+        return self._facade.find_province(self.id[:2])
+

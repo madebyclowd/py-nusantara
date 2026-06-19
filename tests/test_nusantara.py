@@ -28,6 +28,9 @@ from py_nusantara import (
     PostalCodeInfo,
     parse_postal_code,
     validate_postal_code,
+    clean_region_code,
+    format_region_code,
+    validate_region_code,
 )
 
 
@@ -612,6 +615,83 @@ def test_postal_code_validation_and_parsing():
     assert len(info_none.districts) == 0
     assert len(info_none.regencies) == 0
     assert len(info_none.provinces) == 0
+
+
+def test_region_enhancements():
+    # 1. Relationship shortcuts
+    # Keude Bakongan ID = '1101012001'
+    village = find_village("1101012001")
+    assert village is not None
+    assert village.regency is not None
+    assert village.regency.name == "Kabupaten Aceh Selatan"
+    assert village.province is not None
+    assert village.province.name == "Aceh"
+    
+    # District Bakongan ID = '110101'
+    district = find_district("110101")
+    assert district is not None
+    assert district.province is not None
+    assert district.province.name == "Aceh"
+    
+    # 2. City vs Regency classifications
+    # Kota Banda Aceh ID = '1171' (or matches startswith "KOTA")
+    banda_aceh = find_regency("1171")
+    assert banda_aceh is not None
+    assert banda_aceh.is_city is True
+    assert banda_aceh.type == "Kota"
+    
+    # Kabupaten Aceh Selatan ID = '1101'
+    aceh_selatan = find_regency("1101")
+    assert aceh_selatan is not None
+    assert aceh_selatan.is_city is False
+    assert aceh_selatan.type == "Kabupaten"
+    
+    # 3. Regional code utilities
+    assert clean_region_code("32.73.01.2001") == "3273012001"
+    assert clean_region_code("  32.73  ") == "3273"
+    
+    assert format_region_code("32") == "32"
+    assert format_region_code("3273") == "32.73"
+    assert format_region_code("327301") == "32.73.01"
+    assert format_region_code("3273012001") == "32.73.01.2001"
+    
+    with pytest.raises(TypeError):
+        clean_region_code(1234)
+    with pytest.raises(TypeError):
+        format_region_code(1234)
+    with pytest.raises(ValueError):
+        format_region_code("123")
+    with pytest.raises(ValueError):
+        format_region_code("3273012001A")
+        
+    assert validate_region_code("32.73.01.2001") is True
+    assert validate_region_code("12345") is False
+    assert validate_region_code("32730a") is False
+    assert validate_region_code(None) is False
+
+    # 4. Scoped searches
+    clear_cache()
+    # "Bakongan" matches districts / villages in Aceh (Province '11', Regency '1101')
+    
+    # Scoped to province '11' -> should find it
+    res_in_scope = search("Bakongan", scope={"province_id": "11"})
+    assert len(res_in_scope["districts"]) > 0
+    assert res_in_scope["districts"][0].id.startswith("11")
+    
+    # Scoped to province '32' (Jawa Barat) -> should NOT find it
+    res_out_scope = search("Bakongan", scope={"province_id": "32"})
+    assert len(res_out_scope["districts"]) == 0
+    assert len(res_out_scope["villages"]) == 0
+    
+    # Scoped to regency '1101' -> should find it
+    res_reg_scope = search("Bakongan", scope={"regency_id": "1101"})
+    assert len(res_reg_scope["districts"]) > 0
+    
+    # Scoped to regency '1102' -> should NOT find it
+    res_reg_out = search("Bakongan", scope={"regency_id": "1102"})
+    assert len(res_reg_out["districts"]) == 0
+    assert len(res_reg_out["villages"]) == 0
+
 
 
 

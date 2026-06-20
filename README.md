@@ -6,6 +6,16 @@ Designed for both backend integrations (with SQLAlchemy) and **data science envi
 
 ---
 
+## 📚 Documentation Guides
+
+For in-depth guides and production best practices, check out the specialized documentation chapters:
+* 🚀 [**Getting Started & Architecture**](docs/getting_started.md) — Installation options, custom schema configuration, dynamic property mapping, and pluggable caches.
+* 📊 [**Data Science Guide**](docs/data_science.md) — Exporting to Pandas, Polars, and GeoPandas, performing in-memory 3D KD-Tree spatial KNN/radial/bbox queries, topological borders adjacency matching, and strict NIK century overrides.
+* 🧠 [**Backend (Zero-DB Mode)**](docs/backend_zero_db.md) — Deploying high-performance memory-optimized microservices with multi-process Shared Memory (Uvicorn/Gunicorn), asynchronous startup pre-loading, Redis caches, and FastAPI ASGI blueprints.
+* 🏛️ [**Backend (DB-Bound Mode)**](docs/backend_db.md) — Integrating SQLAlchemy engines, bulk seeding sync/async streams, native PostGIS compilation (ST_Contains, ST_DWithin), PostgreSQL Trigram fuzzy searches, and Repository design patterns.
+
+---
+
 ## ⚡ Key Features
 
 * **Zero-DB Mode**: Load, query, and search regions directly from memory using gzipped CSV datasets—no database connection required.

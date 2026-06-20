@@ -1266,4 +1266,106 @@ def test_record_pickling():
     assert len(loaded.regencies) > 0
 
 
+def test_nik_strict_century():
+    from py_nusantara import parse_nik, validate_nik
+    info = parse_nik("1101010402260001", century_override=1900)
+    assert info.birth_date.year == 1926
+    
+    info_short = parse_nik("1101010402260001", century_override=19)
+    assert info_short.birth_date.year == 1926
+    
+    assert validate_nik("1101010402260001", century_override=1900) is True
+
+
+def test_antimeridian_bbox():
+    from py_nusantara.spatial import _longitude_overlap, _is_lon_in_bounds
+    
+    assert _is_lon_in_bounds(178.0, 175.0, -175.0) is True
+    assert _is_lon_in_bounds(-178.0, 175.0, -175.0) is True
+    assert _is_lon_in_bounds(0.0, 175.0, -175.0) is False
+    
+    assert _longitude_overlap(177.0, 179.0, 175.0, -175.0) is True
+    assert _longitude_overlap(-179.0, -176.0, 175.0, -175.0) is True
+    assert _longitude_overlap(10.0, 20.0, 175.0, -175.0) is False
+
+
+def test_geopandas_integration():
+    from py_nusantara import provinces, to_geodataframe
+    provs = provinces()[:2]
+    
+    try:
+        import geopandas as gpd
+        import shapely.geometry
+        
+        gdf = to_geodataframe(provs)
+        assert isinstance(gdf, gpd.GeoDataFrame)
+        assert "geometry" in gdf.columns
+        assert len(gdf) == 2
+        assert gdf.geometry is not None
+        assert isinstance(gdf.geometry.iloc[0], shapely.geometry.Point) or isinstance(gdf.geometry.iloc[0], shapely.geometry.Polygon)
+    except ImportError:
+        import pytest
+        with pytest.raises(ImportError):
+            to_geodataframe(provs)
+
+
+def test_topology_find_adjacent(tmp_path):
+    import gzip
+    import csv
+    import hashlib
+    from py_nusantara import Nusantara
+    from py_nusantara.manifest import Manifest
+    
+    mock_prov = tmp_path / "provinces.csv.gz"
+    headers = ["id", "name", "capital", "latitude", "longitude", "elevation", "timezone", "area", "population", "boundary"]
+    rows = [
+        ["11", "Aceh1", "Banda Aceh", "5.5", "95.3", "12.0", "WIB", "56789.0", "5000000", "[[[5.0, 95.0], [6.0, 95.0], [6.0, 96.0], [5.0, 96.0], [5.0, 95.0]]]"],
+        ["12", "Aceh2", "Medan", "5.5", "96.5", "12.0", "WIB", "56789.0", "5000000", "[[[5.0, 96.0], [6.0, 96.0], [6.0, 97.0], [5.0, 97.0], [5.0, 96.0]]]"]
+    ]
+    with gzip.open(mock_prov, "wt", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        writer.writerows(rows)
+        
+    sha = hashlib.sha256()
+    with open(mock_prov, "rb") as file_bin:
+        while chunk := file_bin.read(8192):
+            sha.update(chunk)
+    Manifest.HASHES["provinces.csv.gz"] = sha.hexdigest()
+    
+    config_dict = {
+        "columns": {
+            "provinces": {"boundary": {"name": "boundary", "enabled": True}},
+        },
+        "boundaries": {
+            "local_path": str(tmp_path),
+            "verify_checksum": True
+        }
+    }
+    
+    nus = Nusantara(config_dict)
+    nus.clear_cache()
+    
+    provs = nus.provinces()
+    assert len(provs) == 2
+    
+    try:
+        adj = nus.find_adjacent(provs[0])
+        assert len(adj) == 1
+        assert adj[0].id == "12"
+    except ImportError:
+        pass
+
+
+def test_async_spatial_index_preloading():
+    import asyncio
+    from py_nusantara import init_spatial_indexes_async
+    
+    async def run_async_init():
+        await init_spatial_indexes_async(levels=["provinces"])
+        
+    asyncio.run(run_async_init())
+
+
+
 

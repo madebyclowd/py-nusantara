@@ -93,6 +93,9 @@ __all__ = [
     "find_knn",
     "find_in_bbox",
     "resolve_legacy_id",
+    "to_geodataframe",
+    "find_adjacent",
+    "init_spatial_indexes_async",
 ]
 
 
@@ -368,13 +371,69 @@ class Nusantara:
         import pandas as pd
         return pd.DataFrame([v.to_dict(logical) for v in self.villages_of(district_id)])
 
-    def parse_nik(self, nik: str, reference_year: Optional[int] = None) -> NIKInfo:
+    def parse_nik(self, nik: str, reference_year: Optional[int] = None, century_override: Optional[int] = None) -> NIKInfo:
         """Parse Nomor Induk Kependudukan (NIK) and resolve its location using this instance."""
-        return _parse_nik(nik, reference_year=reference_year, facade_ref=self)
+        return _parse_nik(nik, reference_year=reference_year, facade_ref=self, century_override=century_override)
 
-    def validate_nik(self, nik: str, reference_year: Optional[int] = None) -> bool:
+    def validate_nik(self, nik: str, reference_year: Optional[int] = None, century_override: Optional[int] = None) -> bool:
         """Validate if the given NIK is syntactically valid."""
-        return _validate_nik(nik, reference_year=reference_year)
+        return _validate_nik(nik, reference_year=reference_year, century_override=century_override)
+
+    def to_geodataframe(self, records: List[BaseRecord], logical: bool = True) -> Any:
+        """Convert a list of regional records to a GeoPandas GeoDataFrame with Shapely geometries."""
+        try:
+            import geopandas as gpd
+            import shapely.geometry
+        except ImportError:
+            raise ImportError(
+                "geopandas and shapely are required to use to_geodataframe. "
+                "Install them via: pip install geopandas shapely"
+            )
+        
+        dicts = []
+        geometries = []
+        
+        for r in records:
+            d = r.to_dict(logical=logical)
+            boundary_val = getattr(r, "boundary", None)
+            geom = None
+            if boundary_val:
+                from py_nusantara.spatial import parse_boundary_to_geojson_geometry
+                geojson_geom = parse_boundary_to_geojson_geometry(boundary_val)
+                if geojson_geom:
+                    geom = shapely.geometry.shape(geojson_geom)
+            
+            if not geom:
+                lat = getattr(r, "latitude", None)
+                lon = getattr(r, "longitude", None)
+                if lat is not None and lon is not None:
+                    geom = shapely.geometry.Point(float(lon), float(lat))
+                    
+            dicts.append(d)
+            geometries.append(geom)
+            
+        gdf = gpd.GeoDataFrame(dicts, geometry=geometries, crs="EPSG:4326")
+        return gdf
+
+    def find_adjacent(
+        self,
+        record: BaseRecord,
+        level: Optional[str] = None,
+    ) -> List[BaseRecord]:
+        """Find all administrative regions of a specific level adjacent (touching) to the given record."""
+        return self.query_adapter.find_adjacent(record, level=level)
+
+    async def init_spatial_indexes_async(
+        self,
+        levels: List[str] = ["provinces", "regencies", "districts", "villages"]
+    ) -> None:
+        """Asynchronously pre-build the 3D KD-Tree spatial indexes in background executor threads to avoid blocking the event loop."""
+        import asyncio
+        loop = asyncio.get_running_loop()
+        tasks = []
+        for level in levels:
+            tasks.append(loop.run_in_executor(None, self._get_spatial_index, level))
+        await asyncio.gather(*tasks)
 
     def parse_postal_code(self, postal_code: str) -> PostalCodeInfo:
         """Parse postal code and resolve its administrative region hierarchy using this instance (cached)."""
@@ -756,12 +815,12 @@ def villages_df(district_id: str, logical: bool = True) -> Any:
 
 
 # NIK Shortcuts
-def parse_nik(nik: str, reference_year: Optional[int] = None) -> NIKInfo:
-    return _get_instance().parse_nik(nik, reference_year=reference_year)
+def parse_nik(nik: str, reference_year: Optional[int] = None, century_override: Optional[int] = None) -> NIKInfo:
+    return _get_instance().parse_nik(nik, reference_year=reference_year, century_override=century_override)
 
 
-def validate_nik(nik: str, reference_year: Optional[int] = None) -> bool:
-    return _get_instance().validate_nik(nik, reference_year=reference_year)
+def validate_nik(nik: str, reference_year: Optional[int] = None, century_override: Optional[int] = None) -> bool:
+    return _get_instance().validate_nik(nik, reference_year=reference_year, century_override=century_override)
 
 
 # Postal Code Shortcuts
@@ -798,6 +857,17 @@ def find_in_bbox(
         min_lat, min_lon, max_lat, max_lon, level=level, use_boundary=use_boundary
     )
 
+
+def to_geodataframe(records: List[BaseRecord], logical: bool = True) -> Any:
+    return _get_instance().to_geodataframe(records, logical=logical)
+
+
+def find_adjacent(record: BaseRecord, level: Optional[str] = None) -> List[BaseRecord]:
+    return _get_instance().find_adjacent(record, level=level)
+
+
+async def init_spatial_indexes_async(levels: List[str] = ["provinces", "regencies", "districts", "villages"]) -> None:
+    await _get_instance().init_spatial_indexes_async(levels)
 
 
 # Historical mapping shortcut

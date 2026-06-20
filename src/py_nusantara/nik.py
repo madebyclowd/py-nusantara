@@ -79,7 +79,7 @@ class NIKInfo:
 
 
 def _parse_nik_parts(
-    nik: str, reference_year: Optional[int] = None
+    nik: str, reference_year: Optional[int] = None, century_override: Optional[int] = None
 ) -> Tuple[str, str, str, str, datetime.date, str]:
     """Helper function to validate NIK structure and parse component values.
     
@@ -130,11 +130,17 @@ def _parse_nik_parts(
     # Parse year
     yy_part = int(nik[10:12])
 
-    # Apply century threshold heuristic using the reference or current year
-    current_year = reference_year or datetime.date.today().year
-    year = 2000 + yy_part
-    if year > current_year:
-        year = 1900 + yy_part
+    if century_override is not None:
+        if century_override < 100:
+            year = century_override * 100 + yy_part
+        else:
+            year = (century_override // 100) * 100 + yy_part
+    else:
+        # Apply century threshold heuristic using the reference or current year
+        current_year = reference_year or datetime.date.today().year
+        year = 2000 + yy_part
+        if year > current_year:
+            year = 1900 + yy_part
 
     # Validate that it's a valid calendar date
     try:
@@ -152,24 +158,29 @@ def _parse_nik_parts(
     return province_id, regency_id, district_id, gender, birth_date, sequence
 
 
-def validate_nik(nik: str, reference_year: Optional[int] = None) -> bool:
+def validate_nik(
+    nik: str, reference_year: Optional[int] = None, century_override: Optional[int] = None
+) -> bool:
     """Validate if the given NIK is syntactically valid."""
     try:
-        _parse_nik_parts(nik, reference_year)
+        _parse_nik_parts(nik, reference_year, century_override)
         return True
     except NIKValidationError:
         return False
 
 
 def parse_nik(
-    nik: str, reference_year: Optional[int] = None, facade_ref: Optional[Any] = None
+    nik: str,
+    reference_year: Optional[int] = None,
+    facade_ref: Optional[Any] = None,
+    century_override: Optional[int] = None,
 ) -> NIKInfo:
     """Parse the given NIK and return a NIKInfo object.
     
     Raises NIKValidationError if NIK is invalid.
     """
     province_id, regency_id, district_id, gender, birth_date, sequence = _parse_nik_parts(
-        nik, reference_year
+        nik, reference_year, century_override
     )
     return NIKInfo(
         nik=nik,

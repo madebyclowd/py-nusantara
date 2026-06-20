@@ -102,6 +102,14 @@ class QueryAdapter(ABC):
     ) -> List[BaseRecord]:
         pass
 
+    @abstractmethod
+    def find_adjacent(
+        self,
+        record: BaseRecord,
+        level: Optional[str] = None,
+    ) -> List[BaseRecord]:
+        pass
+
 
 class InMemoryQueryAdapter(QueryAdapter):
     """CSV direct-access in-memory query engine adapter."""
@@ -336,6 +344,57 @@ class InMemoryQueryAdapter(QueryAdapter):
     ) -> List[BaseRecord]:
         return self.facade._execute_find_in_bbox(min_lat, min_lon, max_lat, max_lon, level, use_boundary)
 
+    def find_adjacent(
+        self,
+        record: BaseRecord,
+        level: Optional[str] = None,
+    ) -> List[BaseRecord]:
+        target_level = level or record._level
+        if target_level not in ("provinces", "regencies", "districts", "villages"):
+            raise ValueError("level must be one of: provinces, regencies, districts, villages")
+            
+        boundary_val = getattr(record, "boundary", None)
+        if not boundary_val:
+            return []
+
+        try:
+            import shapely.geometry
+            from py_nusantara.spatial import parse_boundary_to_geojson_geometry
+        except ImportError:
+            raise ImportError("shapely is required to find adjacent regions.")
+
+        geojson_geom = parse_boundary_to_geojson_geometry(boundary_val)
+        if not geojson_geom:
+            return []
+        query_shape = shapely.geometry.shape(geojson_geom)
+
+        candidates = []
+        if target_level == "provinces":
+            candidates = self.provinces()
+        elif target_level == "regencies":
+            raw = self.facade._get_shared_data("regencies_dataset", lambda: self.reader.read_regencies())
+            candidates = [RegencyRecord(r, self.config, self.facade) for r in raw]
+        elif target_level == "districts":
+            raw = self.facade._get_shared_data("districts_dataset", lambda: self.reader.read_districts())
+            candidates = [DistrictRecord(r, self.config, self.facade) for r in raw]
+        elif target_level == "villages":
+            # Optimization: only check villages of same province to avoid O(N) boundary geometry parsing
+            prov_id = record.id[:2]
+            candidates = self.villages_of_province(prov_id)
+
+        results = []
+        for cand in candidates:
+            if cand.id == record.id and target_level == record._level:
+                continue
+            cand_boundary = getattr(cand, "boundary", None)
+            if cand_boundary:
+                cand_geom = parse_boundary_to_geojson_geometry(cand_boundary)
+                if cand_geom:
+                    cand_shape = shapely.geometry.shape(cand_geom)
+                    if query_shape.touches(cand_shape):
+                        results.append(cand)
+        return results
+
 
 class DatabaseQueryAdapter(QueryAdapter):
     """Database-backed SQL compiling query engine adapter using SQLAlchemy."""
@@ -397,11 +456,9 @@ class DatabaseQueryAdapter(QueryAdapter):
         for logical_name, col_cfg in self.config.get_columns(level).items():
             if col_cfg.get("enabled", False):
                 db_name = col_cfg.get("name", logical_name)
-                # Keep original geometry objects or coordinate text as is
                 val = getattr(orm_instance, db_name, None)
                 data[db_name] = val
         
-        # Preserve distance_km if populated dynamically
         if hasattr(orm_instance, "distance_km"):
             data["distance_km"] = orm_instance.distance_km
 
@@ -479,7 +536,6 @@ class DatabaseQueryAdapter(QueryAdapter):
 
     def villages_of_province(self, province_id: str) -> List[VillageRecord]:
         model = self.models["Village"]
-        # In standardized tables, village ID starts with the province ID prefix (e.g. "11...")
         stmt = sa.select(model).where(model.id.like(f"{province_id}%"))
         if self.config.is_column_enabled("villages", "name"):
             stmt = stmt.order_by(model.name)
@@ -520,15 +576,12 @@ class DatabaseQueryAdapter(QueryAdapter):
             "villages": [],
         }
 
-        # Helper to construct matching expression
         def _get_filter_expr(model, q):
-            # If pg_trgm is requested on PostgreSQL
             if fuzzy and "postgresql" in self.dialect_name:
                 return sa.func.similarity(model.name, q) >= threshold
             else:
                 return model.name.ilike(f"%{q}%")
 
-        # Helper to apply order by similarity when using pg_trgm
         def _apply_ordering(stmt, model, q):
             if fuzzy and "postgresql" in self.dialect_name:
                 return stmt.order_by(sa.func.similarity(model.name, q).desc())
@@ -615,11 +668,9 @@ class DatabaseQueryAdapter(QueryAdapter):
             "village": None,
         }
 
-        # Helper to resolve containing or nearest record
         def _resolve_level(level: str, parent_filter: Optional[Any] = None) -> Optional[Any]:
             model = self.models[level[:-1].capitalize()] if level != "regencies" else self.models["Regency"]
             
-            # PostGIS ST_Contains checks
             if self.config.is_column_enabled(level, "boundary") and (self.config.use_geoalchemy2 or "postgresql" in self.dialect_name):
                 point = sa.func.ST_SetSRID(sa.func.ST_Point(longitude, latitude), 4326)
                 stmt = sa.select(model).where(sa.func.ST_Contains(model.boundary, point))
@@ -629,7 +680,6 @@ class DatabaseQueryAdapter(QueryAdapter):
                 if matches:
                     return matches[0]
 
-            # Fallback to nearest centroid if requested
             if fallback_to_nearest:
                 point = sa.func.ST_SetSRID(sa.func.ST_Point(longitude, latitude), 4326)
                 if self.config.use_geoalchemy2 or "postgresql" in self.dialect_name:
@@ -651,22 +701,18 @@ class DatabaseQueryAdapter(QueryAdapter):
             
             return None
 
-        # 1. Province
         prov_orm = _resolve_level("provinces")
         if prov_orm:
             res["province"] = self._to_record(prov_orm, "provinces")
 
-            # 2. Regency
             reg_orm = _resolve_level("regencies", parent_filter=(self.models["Regency"].province_id == prov_orm.id))
             if reg_orm:
                 res["regency"] = self._to_record(reg_orm, "regencies")
 
-                # 3. District
                 dist_orm = _resolve_level("districts", parent_filter=(self.models["District"].regency_id == reg_orm.id))
                 if dist_orm:
                     res["district"] = self._to_record(dist_orm, "districts")
 
-                    # 4. Village
                     vil_orm = _resolve_level("villages", parent_filter=(self.models["Village"].district_id == dist_orm.id))
                     if vil_orm:
                         res["village"] = self._to_record(vil_orm, "villages")
@@ -678,7 +724,6 @@ class DatabaseQueryAdapter(QueryAdapter):
     ) -> List[BaseRecord]:
         model = self.models[level[:-1].capitalize()] if level != "regencies" else self.models["Regency"]
         
-        # PostGIS ST_DWithin check
         if self.config.use_geoalchemy2 or "postgresql" in self.dialect_name:
             point = sa.func.ST_SetSRID(sa.func.ST_Point(longitude, latitude), 4326)
             if self.config.is_column_enabled(level, "boundary"):
@@ -688,7 +733,6 @@ class DatabaseQueryAdapter(QueryAdapter):
                 geom_expr = sa.cast(centroid_point, sa.Geography)
             point_expr = sa.cast(point, sa.Geography)
             
-            # ST_DWithin on geography operates in meters
             stmt = sa.select(model).where(sa.func.ST_DWithin(geom_expr, point_expr, radius_km * 1000))
             stmt = stmt.order_by(sa.func.ST_Distance(geom_expr, point_expr))
             results = self._execute_stmt(stmt)
@@ -700,7 +744,6 @@ class DatabaseQueryAdapter(QueryAdapter):
                 records.append(rec)
             return records
 
-        # Standard SQL math prune using Bounding Box (utilizing index on lat/lon) + exact python haversine
         lat_delta = radius_km / 111.0
         cos_lat = math.cos(math.radians(latitude))
         lon_delta = radius_km / (111.0 * cos_lat) if cos_lat > 0.01 else 180.0
@@ -728,7 +771,6 @@ class DatabaseQueryAdapter(QueryAdapter):
         model = self.models[level[:-1].capitalize()] if level != "regencies" else self.models["Regency"]
         point = sa.func.ST_SetSRID(sa.func.ST_Point(longitude, latitude), 4326)
         
-        # PostGIS index-assisted KNN using <-> operator
         if self.config.use_geoalchemy2 or "postgresql" in self.dialect_name:
             if self.config.is_column_enabled(level, "boundary"):
                 order_expr = model.boundary.op("<->")(point)
@@ -738,7 +780,6 @@ class DatabaseQueryAdapter(QueryAdapter):
             
             stmt = sa.select(model).order_by(order_expr).limit(k)
         else:
-            # Standard math fallback
             order_expr = (model.latitude - latitude) * (model.latitude - latitude) + (model.longitude - longitude) * (model.longitude - longitude)
             stmt = sa.select(model).order_by(order_expr).limit(k)
 
@@ -761,19 +802,86 @@ class DatabaseQueryAdapter(QueryAdapter):
     ) -> List[BaseRecord]:
         model = self.models[level[:-1].capitalize()] if level != "regencies" else self.models["Regency"]
         
-        # Standardize bounds
         min_lat, max_lat = min(min_lat, max_lat), max(min_lat, max_lat)
-        min_lon, max_lon = min(min_lon, max_lon), max(min_lon, max_lon)
 
-        # PostGIS bounding box overlap
         if use_boundary and self.config.is_column_enabled(level, "boundary") and (self.config.use_geoalchemy2 or "postgresql" in self.dialect_name):
-            envelope = sa.func.ST_MakeEnvelope(min_lon, min_lat, max_lon, max_lat, 4326)
-            stmt = sa.select(model).where(sa.func.ST_Intersects(model.boundary, envelope))
+            if min_lon <= max_lon:
+                envelope = sa.func.ST_MakeEnvelope(min_lon, min_lat, max_lon, max_lat, 4326)
+                stmt = sa.select(model).where(sa.func.ST_Intersects(model.boundary, envelope))
+            else:
+                envelope1 = sa.func.ST_MakeEnvelope(min_lon, min_lat, 180.0, max_lat, 4326)
+                envelope2 = sa.func.ST_MakeEnvelope(-180.0, min_lat, max_lon, max_lat, 4326)
+                stmt = sa.select(model).where(sa.func.ST_Intersects(model.boundary, envelope1) | sa.func.ST_Intersects(model.boundary, envelope2))
             return [self._to_record(r, level) for r in self._execute_stmt(stmt)]
 
-        # Centroid query
+        if min_lon <= max_lon:
+            lon_filter = model.longitude.between(min_lon, max_lon)
+        else:
+            lon_filter = (model.longitude >= min_lon) | (model.longitude <= max_lon)
+
         stmt = sa.select(model).where(
-            model.latitude.between(min_lat, max_lat) &
-            model.longitude.between(min_lon, max_lon)
+            model.latitude.between(min_lat, max_lat) & lon_filter
         )
         return [self._to_record(r, level) for r in self._execute_stmt(stmt)]
+
+    def find_adjacent(
+        self,
+        record: BaseRecord,
+        level: Optional[str] = None,
+    ) -> List[BaseRecord]:
+        target_level = level or record._level
+        model = self.models[target_level[:-1].capitalize()] if target_level != "regencies" else self.models["Regency"]
+        
+        boundary_val = getattr(record, "boundary", None)
+        if not boundary_val:
+            return []
+
+        if self.config.is_column_enabled(target_level, "boundary") and (self.config.use_geoalchemy2 or "postgresql" in self.dialect_name):
+            from py_nusantara.downloader import json_to_wkt
+            wkt_val = None
+            if isinstance(boundary_val, str):
+                if boundary_val.strip().startswith("["):
+                    wkt_val = json_to_wkt(boundary_val)
+                else:
+                    wkt_val = boundary_val
+            
+            if wkt_val:
+                geom_element = sa.func.ST_GeomFromText(wkt_val, 4326)
+                stmt = sa.select(model).where(
+                    (sa.func.ST_Touches(model.boundary, geom_element) | sa.func.ST_Intersects(model.boundary, geom_element)) &
+                    (model.id != record.id)
+                )
+                results = self._execute_stmt(stmt)
+                return [self._to_record(r, target_level) for r in results]
+
+        # Fallback to in-memory filter
+        stmt = sa.select(model)
+        if target_level == "villages":
+            prov_id = record.id[:2]
+            stmt = stmt.where(model.id.like(f"{prov_id}%"))
+            
+        candidates = [self._to_record(r, target_level) for r in self._execute_stmt(stmt)]
+        
+        try:
+            import shapely.geometry
+            from py_nusantara.spatial import parse_boundary_to_geojson_geometry
+        except ImportError:
+            return []
+
+        geojson_geom = parse_boundary_to_geojson_geometry(boundary_val)
+        if not geojson_geom:
+            return []
+        query_shape = shapely.geometry.shape(geojson_geom)
+
+        results = []
+        for cand in candidates:
+            if cand.id == record.id and target_level == record._level:
+                continue
+            cand_boundary = getattr(cand, "boundary", None)
+            if cand_boundary:
+                cand_geom = parse_boundary_to_geojson_geometry(cand_boundary)
+                if cand_geom:
+                    cand_shape = shapely.geometry.shape(cand_geom)
+                    if query_shape.touches(cand_shape):
+                        results.append(cand)
+        return results

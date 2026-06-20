@@ -311,6 +311,25 @@ def parse_boundary_to_geojson_geometry(boundary_val: Any) -> Optional[dict[str, 
     return None
 
 
+def _longitude_overlap(b_min_lon: float, b_max_lon: float, min_lon: float, max_lon: float) -> bool:
+    """Helper to check if a candidate longitude range [b_min_lon, b_max_lon] overlaps
+    with a query longitude range [min_lon, max_lon], supporting antimeridian wrap-around.
+    """
+    if min_lon <= max_lon:
+        return not (b_max_lon < min_lon or b_min_lon > max_lon)
+    else:
+        # Crosses antimeridian: query region is [min_lon, 180] U [-180, max_lon]
+        return not (b_max_lon < min_lon or b_min_lon > 180.0) or not (b_max_lon < -180.0 or b_min_lon > max_lon)
+
+
+def _is_lon_in_bounds(lon: float, min_lon: float, max_lon: float) -> bool:
+    """Helper to check if a point longitude is within the range, supporting antimeridian."""
+    if min_lon <= max_lon:
+        return min_lon <= lon <= max_lon
+    else:
+        return lon >= min_lon or lon <= max_lon
+
+
 def _is_boundary_in_bbox(
     boundary_val: Any,
     min_lat: float,
@@ -332,8 +351,13 @@ def _is_boundary_in_bbox(
             from geoalchemy2.shape import to_shape
             import shapely.geometry
             shape = to_shape(boundary_val)
-            bbox_poly = shapely.geometry.box(min_lon, min_lat, max_lon, max_lat)
-            return shape.intersects(bbox_poly)
+            if min_lon <= max_lon:
+                bbox_poly = shapely.geometry.box(min_lon, min_lat, max_lon, max_lat)
+                return shape.intersects(bbox_poly)
+            else:
+                bbox_poly1 = shapely.geometry.box(min_lon, min_lat, 180.0, max_lat)
+                bbox_poly2 = shapely.geometry.box(-180.0, min_lat, max_lon, max_lat)
+                return shape.intersects(bbox_poly1) or shape.intersects(bbox_poly2)
         except Exception:
             if hasattr(boundary_val, "data") and isinstance(boundary_val.data, str):
                 boundary_val = boundary_val.data
@@ -341,8 +365,13 @@ def _is_boundary_in_bbox(
                 try:
                     import shapely.wkb
                     shape = shapely.wkb.loads(bytes.fromhex(boundary_val.desc))
-                    bbox_poly = shapely.geometry.box(min_lon, min_lat, max_lon, max_lat)
-                    return shape.intersects(bbox_poly)
+                    if min_lon <= max_lon:
+                        bbox_poly = shapely.geometry.box(min_lon, min_lat, max_lon, max_lat)
+                        return shape.intersects(bbox_poly)
+                    else:
+                        bbox_poly1 = shapely.geometry.box(min_lon, min_lat, 180.0, max_lat)
+                        bbox_poly2 = shapely.geometry.box(-180.0, min_lat, max_lon, max_lat)
+                        return shape.intersects(bbox_poly1) or shape.intersects(bbox_poly2)
                 except Exception:
                     pass
 
@@ -396,13 +425,13 @@ def _is_boundary_in_bbox(
     b_min_lon = min(lons)
     b_max_lon = max(lons)
 
-    # Check for bounding box overlap (AABB intersection)
-    return not (
-        b_max_lat < min_lat
-        or b_min_lat > max_lat
-        or b_max_lon < min_lon
-        or b_min_lon > max_lon
-    )
+    # Check for latitude overlap
+    lat_overlap = not (b_max_lat < min_lat or b_min_lat > max_lat)
+    
+    # Check for longitude overlap (with antimeridian handling)
+    lon_overlap = _longitude_overlap(b_min_lon, b_max_lon, min_lon, max_lon)
+
+    return lat_overlap and lon_overlap
 
 
 def _extract_points(arr: Any) -> List[List[float]]:

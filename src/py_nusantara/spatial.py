@@ -2,9 +2,70 @@ import math
 import json
 import logging
 import heapq
+import functools
 from typing import Any, List, Optional
 
 logger = logging.getLogger("py_nusantara")
+
+# Try to import shapely for C-optimized boundary checks
+try:
+    import shapely.geometry
+    import shapely.prepared
+    SHAPELY_AVAILABLE = True
+except ImportError:
+    SHAPELY_AVAILABLE = False
+
+
+@functools.lru_cache(maxsize=10000)
+def _get_cached_geometry(boundary_str: str) -> Optional[Any]:
+    """Parse geometry and cache it.
+    
+    If Shapely is available, returns a prepared Shapely geometry.
+    Otherwise, returns a tuple of (coords, (min_lat, min_lon, max_lat, max_lon)).
+    """
+    try:
+        coords = json.loads(boundary_str)
+    except Exception as e:
+        logger.debug(f"Failed to parse boundary JSON: {e}")
+        return None
+
+    if not isinstance(coords, list) or not coords:
+        return None
+
+    if SHAPELY_AVAILABLE:
+        try:
+            depth = _get_array_depth(coords)
+            if depth == 3:
+                # Single Polygon (coords[0] is exterior, coords[1:] is interior rings)
+                poly = shapely.geometry.Polygon(coords[0], coords[1:])
+            elif depth == 4:
+                # MultiPolygon (list of polygons)
+                polys = []
+                for p in coords:
+                    if len(p) > 0:
+                        polys.append(shapely.geometry.Polygon(p[0], p[1:]))
+                poly = shapely.geometry.MultiPolygon(polys)
+            else:
+                return None
+            return shapely.prepared.prep(poly)
+        except Exception as e:
+            logger.debug(f"Failed to build Shapely geometry: {e}")
+            # Fall back to pure Python path if Shapely fails
+            pass
+
+    # Fallback/default pure Python path
+    pts = _extract_points(coords)
+    if not pts:
+        return None
+
+    lats = [pt[0] for pt in pts]
+    lons = [pt[1] for pt in pts]
+    min_lat = min(lats)
+    max_lat = max(lats)
+    min_lon = min(lons)
+    max_lon = max(lons)
+
+    return coords, (min_lat, min_lon, max_lat, max_lon)
 
 
 def haversine_distance(lat1: float, lon1: float, lat2: float, lon2: float) -> float:
@@ -35,15 +96,27 @@ def is_point_in_boundary(lat: float, lon: float, boundary_str: Optional[str]) ->
     """
     if not boundary_str:
         return False
-    try:
-        coords = json.loads(boundary_str)
-    except Exception as e:
-        logger.debug(f"Failed to parse boundary JSON: {e}")
+
+    parsed = _get_cached_geometry(boundary_str)
+    if not parsed:
         return False
 
-    if not isinstance(coords, list) or not coords:
+    if SHAPELY_AVAILABLE and not isinstance(parsed, tuple):
+        try:
+            pt = shapely.geometry.Point(lat, lon)
+            return parsed.contains(pt)
+        except Exception as e:
+            logger.debug(f"Shapely point check failed: {e}")
+            return False
+
+    # Pure Python path
+    coords, (min_lat, min_lon, max_lat, max_lon) = parsed
+
+    # 1. Quick bounding box (AABB) check
+    if not (min_lat <= lat <= max_lat and min_lon <= lon <= max_lon):
         return False
 
+    # 2. Ray-casting algorithm
     depth = _get_array_depth(coords)
     if depth == 3:
         # Single Polygon (list of rings)

@@ -1,6 +1,7 @@
 from typing import Any, Dict, List, Optional
 from py_nusantara.config import NusantaraConfig
 from py_nusantara.reader import NusantaraReader
+from py_nusantara.utils import string_similarity
 
 
 class NusantaraSearch:
@@ -11,9 +12,15 @@ class NusantaraSearch:
         self.reader = reader
 
     def search(
-        self, query: str, limit: int = 20, scope: Optional[Dict[str, str]] = None
+        self,
+        query: str,
+        limit: int = 20,
+        scope: Optional[Dict[str, str]] = None,
+        fuzzy: bool = False,
+        threshold: float = 0.6,
+        similarity_method: str = "levenshtein",
     ) -> Dict[str, List[Dict[str, Any]]]:
-        """Search for regional names matching a query string (case-insensitive substring match).
+        """Search for regional names matching a query string (fuzzy or case-insensitive substring match).
         
         Supports a scope dictionary (province_id, regency_id, district_id) to filter search results.
         Returns a dictionary with matching records for each level up to the limit.
@@ -55,20 +62,60 @@ class NusantaraSearch:
             "villages": [],
         }
 
+        # Helper for length pruning checks
+        def _should_prune(c_name: str) -> bool:
+            if not fuzzy:
+                return False
+            
+            c_clean = c_name.lower().strip()
+            for prefix in ("kabupaten ", "kota ", "kecamatan ", "kelurahan ", "desa ", "provinsi ", "daerah istimewa "):
+                if c_clean.startswith(prefix):
+                    c_clean = c_clean[len(prefix):].strip()
+                    break
+                    
+            len_q = len(query)
+            len_candidates = [len(c_clean)] + [len(w) for w in c_clean.split()]
+            
+            for len_c in len_candidates:
+                if similarity_method == "trigram" and len_q >= 3 and len_c >= 3:
+                    if min(len_q - 2, len_c - 2) >= threshold * max(len_q - 2, len_c - 2):
+                        return False
+                else:
+                    if abs(len_q - len_c) <= max(len_q, len_c) * (1.0 - threshold):
+                        return False
+            return True
+
+
         # 1. Search Provinces (Only search if scope is not constrained below province level)
         if not scope_reg and not scope_dist:
+            prov_candidates = []
             for p in self.reader.read_provinces():
                 p_id = p.get(prov_id_col)
                 if scope_prov and p_id != scope_prov:
                     continue
                 name_val = p.get(prov_name_col)
-                if name_val and q_lower in name_val.lower():
-                    results["provinces"].append(p)
-                    if len(results["provinces"]) >= limit:
-                        break
+                if not name_val:
+                    continue
+                
+                if fuzzy:
+                    if _should_prune(name_val):
+                        continue
+                    score = string_similarity(query, name_val, method=similarity_method)
+                    if score >= threshold:
+                        prov_candidates.append((score, p))
+                else:
+                    if q_lower in name_val.lower():
+                        prov_candidates.append((1.0, p))
+                        if len(prov_candidates) >= limit:
+                            break
+            
+            if fuzzy:
+                prov_candidates.sort(key=lambda x: x[0], reverse=True)
+            results["provinces"] = [c[1] for c in prov_candidates[:limit]]
 
         # 2. Search Regencies (Only search if scope is not constrained below regency level)
         if not scope_dist:
+            reg_candidates = []
             for r in self.reader.read_regencies():
                 r_id = r.get(reg_id_col)
                 if scope_reg and r_id != scope_reg:
@@ -76,12 +123,27 @@ class NusantaraSearch:
                 if scope_prov and r.get(reg_prov_id_col) != scope_prov:
                     continue
                 name_val = r.get(reg_name_col)
-                if name_val and q_lower in name_val.lower():
-                    results["regencies"].append(r)
-                    if len(results["regencies"]) >= limit:
-                        break
+                if not name_val:
+                    continue
+                
+                if fuzzy:
+                    if _should_prune(name_val):
+                        continue
+                    score = string_similarity(query, name_val, method=similarity_method)
+                    if score >= threshold:
+                        reg_candidates.append((score, r))
+                else:
+                    if q_lower in name_val.lower():
+                        reg_candidates.append((1.0, r))
+                        if len(reg_candidates) >= limit:
+                            break
+            
+            if fuzzy:
+                reg_candidates.sort(key=lambda x: x[0], reverse=True)
+            results["regencies"] = [c[1] for c in reg_candidates[:limit]]
 
         # 3. Search Districts
+        dist_candidates = []
         for d in self.reader.read_districts():
             d_id = d.get(dist_id_col) or ""
             if scope_dist and d_id != scope_dist:
@@ -91,10 +153,24 @@ class NusantaraSearch:
             if scope_prov and not d_id.startswith(scope_prov):
                 continue
             name_val = d.get(dist_name_col)
-            if name_val and q_lower in name_val.lower():
-                results["districts"].append(d)
-                if len(results["districts"]) >= limit:
-                    break
+            if not name_val:
+                continue
+            
+            if fuzzy:
+                if _should_prune(name_val):
+                    continue
+                score = string_similarity(query, name_val, method=similarity_method)
+                if score >= threshold:
+                    dist_candidates.append((score, d))
+            else:
+                if q_lower in name_val.lower():
+                    dist_candidates.append((1.0, d))
+                    if len(dist_candidates) >= limit:
+                        break
+        
+        if fuzzy:
+            dist_candidates.sort(key=lambda x: x[0], reverse=True)
+        results["districts"] = [c[1] for c in dist_candidates[:limit]]
 
         # 4. Search Villages (Optimize read using partitions if scoped)
         if scope_dist:
@@ -106,6 +182,7 @@ class NusantaraSearch:
         else:
             villages_source = self.reader.stream_all_villages()
 
+        vil_candidates = []
         for v in villages_source:
             v_dist = v.get(vil_dist_id_col) or ""
             if scope_dist and v_dist != scope_dist:
@@ -115,10 +192,25 @@ class NusantaraSearch:
             if scope_prov and not v_dist.startswith(scope_prov):
                 continue
             name_val = v.get(vil_name_col)
-            if name_val and q_lower in name_val.lower():
-                results["villages"].append(v)
-                if len(results["villages"]) >= limit:
-                    break
+            if not name_val:
+                continue
+            
+            if fuzzy:
+                if _should_prune(name_val):
+                    continue
+                score = string_similarity(query, name_val, method=similarity_method)
+                if score >= threshold:
+                    vil_candidates.append((score, v))
+            else:
+                if q_lower in name_val.lower():
+                    vil_candidates.append((1.0, v))
+                    if len(vil_candidates) >= limit:
+                        break
+        
+        if fuzzy:
+            vil_candidates.sort(key=lambda x: x[0], reverse=True)
+        results["villages"] = [c[1] for c in vil_candidates[:limit]]
 
         return results
+
 

@@ -27,7 +27,7 @@ from py_nusantara.reader import NusantaraReader
 from py_nusantara.search import NusantaraSearch
 from py_nusantara.db import build_models, NusantaraSeeder
 from py_nusantara.downloader import download_boundaries as _download_boundaries, json_to_wkt
-from py_nusantara.spatial import is_point_in_boundary, haversine_distance
+from py_nusantara.spatial import is_point_in_boundary, haversine_distance, _is_boundary_in_bbox
 from py_nusantara.nik import (
     NIKInfo,
     parse_nik as _parse_nik,
@@ -65,6 +65,7 @@ __all__ = [
     "download_boundaries",
     "json_to_wkt",
     "seed_boundaries",
+    "seed_boundaries_async",
     "provinces",
     "find_province",
     "regencies_of",
@@ -89,6 +90,7 @@ __all__ = [
     "validate_region_code",
     "find_nearby",
     "find_knn",
+    "find_in_bbox",
     "resolve_legacy_id",
 ]
 
@@ -225,7 +227,13 @@ class Nusantara:
         return None
 
     def search(
-        self, query: str, limit: int = 20, scope: Optional[Dict[str, str]] = None
+        self,
+        query: str,
+        limit: int = 20,
+        scope: Optional[Dict[str, str]] = None,
+        fuzzy: bool = False,
+        threshold: float = 0.6,
+        similarity_method: str = "levenshtein",
     ) -> Dict[str, List[BaseRecord]]:
         """Search regional names dynamically across all levels, optionally scoped to a parent region."""
         prefix = self.config.cache_prefix
@@ -237,7 +245,14 @@ class Nusantara:
             scope_str = "_".join(f"{k}:{v}" for k, v in sorted(scope.items()))
         
         def _execute_search():
-            raw_res = self.searcher.search(query, limit, scope)
+            raw_res = self.searcher.search(
+                query,
+                limit,
+                scope,
+                fuzzy=fuzzy,
+                threshold=threshold,
+                similarity_method=similarity_method,
+            )
             return {
                 "provinces": [ProvinceRecord(r, self.config, self) for r in raw_res["provinces"]],
                 "regencies": [RegencyRecord(r, self.config, self) for r in raw_res["regencies"]],
@@ -245,11 +260,13 @@ class Nusantara:
                 "villages": [VillageRecord(r, self.config, self) for r in raw_res["villages"]],
             }
 
+        cache_key = f"{prefix}.search.{query}.{limit}.{scope_str}.{fuzzy}.{threshold}.{similarity_method}"
         return self.cache.remember(
-            f"{prefix}.search.{query}.{limit}.{scope_str}",
+            cache_key,
             ttl,
             _execute_search
         )
+
 
 
     def find_by_coordinate(
@@ -387,6 +404,20 @@ class Nusantara:
         """Seed boundaries into a database using SQLAlchemy connection."""
         seeder = NusantaraSeeder(session, self.config, self.reader)
         seeder.seed_boundaries(levels, force, cache_dir, batch_size, progress_callback)
+
+    async def seed_boundaries_async(
+        self,
+        session: Any,
+        levels: List[str] = ["provinces", "regencies", "districts", "villages"],
+        force: bool = False,
+        cache_dir: Optional[Union[str, Path]] = None,
+        batch_size: int = 200,
+        progress_callback: Optional[Any] = None,
+    ) -> None:
+        """Seed boundaries into a database asynchronously using SQLAlchemy AsyncSession."""
+        seeder = NusantaraSeeder(session, self.config, self.reader)
+        await seeder.seed_boundaries_async(levels, force, cache_dir, batch_size, progress_callback)
+
 
     # --- Data Science DataFrame Helpers ---
     def provinces_df(self, logical: bool = True) -> Any:
@@ -564,6 +595,93 @@ class Nusantara:
         results.sort(key=lambda x: getattr(x, "distance_km", 0.0))
         return results[:k]
 
+    def find_in_bbox(
+        self,
+        min_lat: float,
+        min_lon: float,
+        max_lat: float,
+        max_lon: float,
+        level: str = "villages",
+        use_boundary: bool = False,
+    ) -> List[BaseRecord]:
+        """Find all regions of a specific level that are within or intersect a bounding box."""
+        prefix = self.config.cache_prefix
+        ttl = self.config.cache_ttl
+        return self.cache.remember(
+            f"{prefix}.bbox.{min_lat}.{min_lon}.{max_lat}.{max_lon}.{level}.{use_boundary}",
+            ttl,
+            lambda: self._execute_find_in_bbox(min_lat, min_lon, max_lat, max_lon, level, use_boundary)
+        )
+
+    def _execute_find_in_bbox(
+        self,
+        min_lat: float,
+        min_lon: float,
+        max_lat: float,
+        max_lon: float,
+        level: str = "villages",
+        use_boundary: bool = False,
+    ) -> List[BaseRecord]:
+        if level not in ("provinces", "regencies", "districts", "villages"):
+            raise ValueError("level must be one of: provinces, regencies, districts, villages")
+
+        # Standardize coordinates
+        min_lat, max_lat = min(min_lat, max_lat), max(min_lat, max_lat)
+        min_lon, max_lon = min(min_lon, max_lon), max(min_lon, max_lon)
+
+        records = []
+        if level == "provinces":
+            records = self.provinces()
+        elif level == "regencies":
+            records = [RegencyRecord(r, self.config, self) for r in self.reader.read_regencies()]
+        elif level == "districts":
+            records = [DistrictRecord(r, self.config, self) for r in self.reader.read_districts()]
+        elif level == "villages":
+            # Optimization: prune by province bounds
+            target_provinces = []
+            for p in self.provinces():
+                p_lat, p_lon = getattr(p, "latitude", None), getattr(p, "longitude", None)
+                if p_lat is not None and p_lon is not None:
+                    # Expand province centroid by 3 degrees to cover its extent
+                    p_min_lat = p_lat - 3.0
+                    p_max_lat = p_lat + 3.0
+                    p_min_lon = p_lon - 3.0
+                    p_max_lon = p_lon + 3.0
+                    if not (p_max_lat < min_lat or p_min_lat > max_lat or p_max_lon < min_lon or p_min_lon > max_lon):
+                        target_provinces.append(p.id)
+
+            if not target_provinces:
+                return []
+
+            for prov_id in target_provinces:
+                records.extend(self.villages_of_province(prov_id))
+
+        results = []
+        for r in records:
+            r_lat = getattr(r, "latitude", None)
+            r_lon = getattr(r, "longitude", None)
+
+            # Centroid check
+            if r_lat is not None and r_lon is not None:
+                try:
+                    lat_f = float(r_lat)
+                    lon_f = float(r_lon)
+                    if min_lat <= lat_f <= max_lat and min_lon <= lon_f <= max_lon:
+                        results.append(r)
+                        continue
+                except (ValueError, TypeError):
+                    pass
+
+            # Boundary check if requested
+            if use_boundary:
+                boundary_val = getattr(r, "boundary", None)
+                if boundary_val:
+                    if _is_boundary_in_bbox(boundary_val, min_lat, min_lon, max_lat, max_lon):
+                        results.append(r)
+
+        return results
+
+
 
 
 
@@ -622,9 +740,22 @@ def find_village(id: str) -> Optional[VillageRecord]:
 
 
 def search(
-    query: str, limit: int = 20, scope: Optional[Dict[str, str]] = None
+    query: str,
+    limit: int = 20,
+    scope: Optional[Dict[str, str]] = None,
+    fuzzy: bool = False,
+    threshold: float = 0.6,
+    similarity_method: str = "levenshtein",
 ) -> Dict[str, List[BaseRecord]]:
-    return _get_instance().search(query, limit, scope=scope)
+    return _get_instance().search(
+        query,
+        limit,
+        scope=scope,
+        fuzzy=fuzzy,
+        threshold=threshold,
+        similarity_method=similarity_method,
+    )
+
 
 
 
@@ -659,6 +790,18 @@ def seed_boundaries(
     progress_callback: Optional[Any] = None,
 ) -> None:
     _get_instance().seed_boundaries(session, levels, force, cache_dir, batch_size, progress_callback)
+
+
+async def seed_boundaries_async(
+    session: Any,
+    levels: List[str] = ["provinces", "regencies", "districts", "villages"],
+    force: bool = False,
+    cache_dir: Optional[Union[str, Path]] = None,
+    batch_size: int = 200,
+    progress_callback: Optional[Any] = None,
+) -> None:
+    await _get_instance().seed_boundaries_async(session, levels, force, cache_dir, batch_size, progress_callback)
+
 
 
 # DataFrame Shortcuts
@@ -707,6 +850,20 @@ def find_knn(
     latitude: float, longitude: float, k: int = 5, level: str = "villages"
 ) -> List[BaseRecord]:
     return _get_instance().find_knn(latitude, longitude, k=k, level=level)
+
+
+def find_in_bbox(
+    min_lat: float,
+    min_lon: float,
+    max_lat: float,
+    max_lon: float,
+    level: str = "villages",
+    use_boundary: bool = False,
+) -> List[BaseRecord]:
+    return _get_instance().find_in_bbox(
+        min_lat, min_lon, max_lat, max_lon, level=level, use_boundary=use_boundary
+    )
+
 
 
 # Historical mapping shortcut

@@ -465,3 +465,228 @@ class NusantaraSeeder:
                 seeded_count += len(batch_params)
 
         return seeded_count
+
+    async def seed_async(self, batch_size: int = 500, progress_callback: Optional[Any] = None) -> None:
+        """Execute database seeding asynchronously in order: Provinces, Regencies, Districts, Villages.
+        
+        Args:
+            batch_size: Bulk insert chunk size.
+            progress_callback: Callback function called as: callback(stage_name, processed_rows_count).
+        """
+        logger.info("Starting database seeding asynchronously...")
+        from sqlalchemy.orm import declarative_base
+        TempBase = declarative_base()
+        models = build_models(TempBase, self.config)
+        
+        # 1. Seed Provinces
+        if progress_callback:
+            progress_callback("provinces_start", 0)
+        prov_records = self.reader.read_provinces()
+        await self._bulk_insert_async(models["Province"], prov_records, batch_size)
+        if progress_callback:
+            progress_callback("provinces_end", len(prov_records))
+
+        # 2. Seed Regencies
+        if progress_callback:
+            progress_callback("regencies_start", 0)
+        reg_records = self.reader.read_regencies()
+        await self._bulk_insert_async(models["Regency"], reg_records, batch_size)
+        if progress_callback:
+            progress_callback("regencies_end", len(reg_records))
+
+        # 3. Seed Districts
+        if progress_callback:
+            progress_callback("districts_start", 0)
+        dist_records = self.reader.read_districts()
+        await self._bulk_insert_async(models["District"], dist_records, batch_size)
+        if progress_callback:
+            progress_callback("districts_end", len(dist_records))
+
+        # 4. Seed Villages
+        if progress_callback:
+            progress_callback("villages_start", 0)
+        
+        village_batch = []
+        total_villages = 0
+        for village in self.reader.stream_all_villages():
+            village_batch.append(village)
+            if len(village_batch) >= batch_size:
+                await self._bulk_insert_async(models["Village"], village_batch, batch_size)
+                total_villages += len(village_batch)
+                if progress_callback:
+                    progress_callback("villages_progress", total_villages)
+                village_batch = []
+        
+        if village_batch:
+            await self._bulk_insert_async(models["Village"], village_batch, batch_size)
+            total_villages += len(village_batch)
+            
+        if progress_callback:
+            progress_callback("villages_end", total_villages)
+        logger.info("Database seeding asynchronously completed.")
+
+    async def _bulk_insert_async(self, model_class: Any, records: List[Dict[str, Any]], batch_size: int) -> None:
+        """Perform bulk insertion asynchronously using SQLAlchemy Core inserts for speed."""
+        if not records:
+            return
+
+        table = model_class.__table__
+        logger.info(f"Bulk inserting {len(records)} records asynchronously into {table.name}...")
+        for i in range(0, len(records), batch_size):
+            chunk = records[i : i + batch_size]
+            await self.session.execute(sa.insert(table), chunk)
+        await self.session.commit()
+
+    async def seed_boundaries_async(
+        self,
+        levels: List[str] = ["provinces", "regencies", "districts", "villages"],
+        force: bool = False,
+        cache_dir: Optional[Union[str, Path]] = None,
+        batch_size: int = 200,
+        progress_callback: Optional[Any] = None,
+    ) -> None:
+        """Update database records with geographic boundary coordinates from local cache asynchronously.
+        
+        Requires download_boundaries() to be executed first to populate the cache.
+        """
+        # Resolve cache dir
+        boundaries_cfg = self.config._config.get("boundaries", {})
+        local_path = boundaries_cfg.get("local_path")
+        if cache_dir:
+            resolved_cache_dir = Path(cache_dir)
+        elif local_path:
+            resolved_cache_dir = Path(local_path)
+        else:
+            resolved_cache_dir = get_default_cache_dir()
+
+        storage_type = boundaries_cfg.get("type", "spatial")
+        verify_checksum = boundaries_cfg.get("verify_checksum", True)
+        
+        bind = self.session.bind
+        if hasattr(bind, "sync_engine"):
+            driver_name = bind.sync_engine.dialect.name
+        else:
+            driver_name = bind.dialect.name
+
+        placeholder = "ST_GeomFromText(:wkt)"
+        if "mssql" in driver_name:
+            placeholder = "geometry::STGeomFromText(:wkt, 4326)"
+        elif "postgresql" in driver_name:
+            placeholder = "ST_GeomFromText(:wkt, 4326)"
+
+        logger.info(f"Seeding boundaries asynchronously from cache directory: {resolved_cache_dir}")
+
+        for level in levels:
+            table_name = self.config.get_table_name(level)
+            id_col = self.config.resolve_column_name(level, "id")
+            boundary_col = self.config.resolve_column_name(level, "boundary")
+
+            if not self.config.is_column_enabled(level, "boundary"):
+                continue
+
+            if progress_callback:
+                progress_callback("seed_boundaries_start", level)
+
+            # Resolve boundary file paths
+            if level == "villages":
+                from py_nusantara.manifest import Manifest
+                village_files = sorted([k for k in Manifest.HASHES.keys() if k.startswith("villages_")])
+                total_villages = 0
+                for filename in village_files:
+                    filepath = resolved_cache_dir / filename
+                    if not filepath.exists():
+                        continue
+                    
+                    if verify_checksum:
+                        Manifest.verify(filepath)
+
+                    seeded = await self._seed_boundary_file_async(
+                        filepath, table_name, id_col, boundary_col,
+                        storage_type, placeholder, force, batch_size
+                    )
+                    total_villages += seeded
+                    if progress_callback:
+                        progress_callback("seed_boundaries_progress", f"villages: {total_villages}")
+                if progress_callback:
+                    progress_callback("seed_boundaries_end", f"villages: {total_villages}")
+            else:
+                filename = f"{level}.csv.gz"
+                filepath = resolved_cache_dir / filename
+                if not filepath.exists():
+                    raise DataNotFoundError(f"Boundary file not found in cache: {filepath}. Run download_boundaries first.")
+
+                if verify_checksum:
+                    from py_nusantara.manifest import Manifest
+                    Manifest.verify(filepath)
+
+                seeded = await self._seed_boundary_file_async(
+                    filepath, table_name, id_col, boundary_col,
+                    storage_type, placeholder, force, batch_size
+                )
+                if progress_callback:
+                    progress_callback("seed_boundaries_end", f"{level}: {seeded}")
+
+    async def _seed_boundary_file_async(
+        self,
+        filepath: Path,
+        table_name: str,
+        id_col: str,
+        boundary_col: str,
+        storage_type: str,
+        placeholder: str,
+        force: bool,
+        batch_size: int,
+    ) -> int:
+        """Seed a single boundary file asynchronously, returning number of records updated."""
+        seeded_count = 0
+        batch_params = []
+
+        # Form SQL statement with conditional updates for non-forced runs (N+1 query optimization)
+        where_clause = f"WHERE {id_col} = :id"
+        if not force:
+            where_clause += f" AND {boundary_col} IS NULL"
+
+        if storage_type == "spatial":
+            sql = f"UPDATE {table_name} SET {boundary_col} = {placeholder} {where_clause}"
+        else:
+            sql = f"UPDATE {table_name} SET {boundary_col} = :boundary {where_clause}"
+
+        stmt = sa.text(sql)
+
+        with gzip.open(filepath, "rt", newline="", encoding="utf-8") as f:
+            reader = csv.reader(f)
+            try:
+                headers = next(reader)
+            except StopIteration:
+                return 0
+
+            for row in reader:
+                if len(headers) != len(row):
+                    continue
+                record = dict(zip(headers, row))
+                row_id = record.get("id")
+                boundary_json = record.get("boundary")
+
+                if not row_id or not boundary_json:
+                    continue
+
+                if storage_type == "spatial":
+                    wkt = json_to_wkt(boundary_json)
+                    if wkt:
+                        batch_params.append({"wkt": wkt, "id": row_id})
+                else:
+                    batch_params.append({"boundary": boundary_json, "id": row_id})
+
+                if len(batch_params) >= batch_size:
+                    await self.session.execute(stmt, batch_params)
+                    await self.session.commit()
+                    seeded_count += len(batch_params)
+                    batch_params = []
+
+            if batch_params:
+                await self.session.execute(stmt, batch_params)
+                await self.session.commit()
+                seeded_count += len(batch_params)
+
+        return seeded_count
+

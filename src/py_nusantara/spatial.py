@@ -308,6 +308,113 @@ def parse_boundary_to_geojson_geometry(boundary_val: Any) -> Optional[dict[str, 
         geom_type = "Polygon" if depth == 3 else "MultiPolygon"
         swapped = swap_lat_lon(boundary_val)
         return {"type": geom_type, "coordinates": swapped}
-
     return None
 
+
+def _is_boundary_in_bbox(
+    boundary_val: Any,
+    min_lat: float,
+    min_lon: float,
+    max_lat: float,
+    max_lon: float,
+) -> bool:
+    """Helper to check if a geographic boundary intersects a bounding box.
+    
+    Coordinates are automatically identified as latitude/longitude based on typical Indonesian bounds.
+    """
+    if not boundary_val:
+        return False
+
+    # Check if it is a GeoAlchemy2 SpatialElement / WKBElement / WKTElement
+    cls_name = boundary_val.__class__.__name__
+    if cls_name in ("WKBElement", "WKTElement", "SpatialElement"):
+        try:
+            from geoalchemy2.shape import to_shape
+            import shapely.geometry
+            shape = to_shape(boundary_val)
+            bbox_poly = shapely.geometry.box(min_lon, min_lat, max_lon, max_lat)
+            return shape.intersects(bbox_poly)
+        except Exception:
+            if hasattr(boundary_val, "data") and isinstance(boundary_val.data, str):
+                boundary_val = boundary_val.data
+            elif hasattr(boundary_val, "desc") and isinstance(boundary_val.desc, str):
+                try:
+                    import shapely.wkb
+                    shape = shapely.wkb.loads(bytes.fromhex(boundary_val.desc))
+                    bbox_poly = shapely.geometry.box(min_lon, min_lat, max_lon, max_lat)
+                    return shape.intersects(bbox_poly)
+                except Exception:
+                    pass
+
+    coords = None
+    if isinstance(boundary_val, str):
+        boundary_val = boundary_val.strip()
+        if boundary_val.startswith("["):
+            try:
+                coords = json.loads(boundary_val)
+            except Exception:
+                return False
+        elif boundary_val.upper().startswith(("POLYGON", "MULTIPOLYGON")):
+            geom = parse_wkt(boundary_val)
+            if geom and "coordinates" in geom:
+                coords = geom["coordinates"]
+    elif isinstance(boundary_val, list):
+        coords = boundary_val
+
+    if not coords:
+        return False
+
+    pts = _extract_points(coords)
+    if not pts:
+        return False
+
+    # Identify lat/lon coordinates robustly for Indonesian spatial range
+    # Indonesia: lat in [-12, 10], lon in [90, 150]
+    lats = []
+    lons = []
+    for pt in pts:
+        if len(pt) < 2:
+            continue
+        val0, val1 = pt[0], pt[1]
+        # Heuristic: longitude is always > 80, latitude is < 20 in Indonesia
+        if abs(val0) < 20.0 and val1 > 80.0:
+            lats.append(val0)
+            lons.append(val1)
+        elif abs(val1) < 20.0 and val0 > 80.0:
+            lats.append(val1)
+            lons.append(val0)
+        else:
+            # Fallback
+            lats.append(val0)
+            lons.append(val1)
+
+    if not lats or not lons:
+        return False
+
+    b_min_lat = min(lats)
+    b_max_lat = max(lats)
+    b_min_lon = min(lons)
+    b_max_lon = max(lons)
+
+    # Check for bounding box overlap (AABB intersection)
+    return not (
+        b_max_lat < min_lat
+        or b_min_lat > max_lat
+        or b_max_lon < min_lon
+        or b_min_lon > max_lon
+    )
+
+
+def _extract_points(arr: Any) -> List[List[float]]:
+    """Recursively extract all coordinate points [x, y] from nested lists."""
+    if not isinstance(arr, list):
+        return []
+    if len(arr) == 2 and not isinstance(arr[0], list):
+        try:
+            return [[float(arr[0]), float(arr[1])]]
+        except (ValueError, TypeError):
+            return []
+    res = []
+    for item in arr:
+        res.extend(_extract_points(item))
+    return res

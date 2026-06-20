@@ -94,11 +94,38 @@ def string_similarity(s1: str, s2: str, method: str = "levenshtein") -> float:
     s1_lower = s1.strip().lower()
     s2_lower = s2.strip().lower()
     
-    if method == "trigram":
-        return trigram_similarity(s1_lower, s2_lower)
-    
-    # Default is normalized Levenshtein
-    dist = levenshtein_distance(s1_lower, s2_lower)
-    max_len = max(len(s1_lower), len(s2_lower), 1)
-    return 1.0 - (dist / max_len)
+    if s1_lower == s2_lower:
+        return 1.0
+
+    # Helper to calculate similarity of two raw strings
+    def _raw_sim(a: str, b: str) -> float:
+        if method == "trigram":
+            return trigram_similarity(a, b)
+        dist = levenshtein_distance(a, b)
+        max_len = max(len(a), len(b), 1)
+        return 1.0 - (dist / max_len)
+
+    # 1. Compare raw strings
+    best_score = _raw_sim(s1_lower, s2_lower)
+
+    # 2. Compare prefix-stripped strings
+    def _strip_prefix(s: str) -> str:
+        for prefix in ("kabupaten ", "kota ", "kecamatan ", "kelurahan ", "desa ", "provinsi ", "daerah istimewa "):
+            if s.startswith(prefix):
+                return s[len(prefix):].strip()
+        return s
+
+    s1_stripped = _strip_prefix(s1_lower)
+    s2_stripped = _strip_prefix(s2_lower)
+    if s1_stripped != s1_lower or s2_stripped != s2_lower:
+        best_score = max(best_score, _raw_sim(s1_stripped, s2_stripped))
+
+    # 3. Compare word-by-word to support partial word matches (e.g. "Jogjakarta" matching "Daerah Istimewa Yogyakarta")
+    words2 = s2_stripped.split()
+    if len(words2) > 1:
+        for w in words2:
+            best_score = max(best_score, _raw_sim(s1_stripped, w))
+            
+    return best_score
+
 

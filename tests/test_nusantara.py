@@ -992,3 +992,156 @@ def test_geoalchemy2_orm_integration():
         elif "geoalchemy2" in sys.modules:
             del sys.modules["geoalchemy2"]
 
+
+def test_fuzzy_search():
+    from py_nusantara import search, clear_cache
+    clear_cache()
+
+    # Test typo correction
+    res_fuzzy = search("Makasar", fuzzy=True, threshold=0.7, similarity_method="levenshtein")
+    regencies = [r.name for r in res_fuzzy["regencies"]]
+    # Should correct "Makasar" -> "Kota Makassar"
+    assert any("Makassar" in name for name in regencies)
+
+    # Test "Jogjakarta" -> "Yogyakarta"
+    res_fuzzy2 = search("Jogjakarta", fuzzy=True, threshold=0.6)
+    provs = [p.name for p in res_fuzzy2["provinces"]]
+    assert any("Yogyakarta" in name for name in provs)
+
+    # Test "Jogjakarta" -> "Yogyakarta" using trigram
+    res_trigram = search("Jogjakarta", fuzzy=True, threshold=0.3, similarity_method="trigram")
+    provs_tri = [p.name for p in res_trigram["provinces"]]
+    assert any("Yogyakarta" in name for name in provs_tri)
+
+
+
+def test_bbox_query(tmp_path):
+    import gzip
+    import csv
+    from py_nusantara import Nusantara
+    
+    # Create mock cache files containing boundaries
+    mock_prov = tmp_path / "provinces.csv.gz"
+    headers = ["id", "name", "capital", "latitude", "longitude", "elevation", "timezone", "area", "population", "boundary"]
+    rows = [["11", "Aceh", "Banda Aceh", "5.5", "95.3", "12.0", "WIB", "56789.0", "5000000", "[[[5.0, 95.0], [6.0, 95.0], [6.0, 96.0], [5.0, 96.0], [5.0, 95.0]]]"]]
+    with gzip.open(mock_prov, "wt", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        writer.writerows(rows)
+
+    import hashlib
+    from py_nusantara.manifest import Manifest
+    sha = hashlib.sha256()
+    with open(mock_prov, "rb") as file_bin:
+        while chunk := file_bin.read(8192):
+            sha.update(chunk)
+    Manifest.HASHES["provinces.csv.gz"] = sha.hexdigest()
+
+    config_dict = {
+        "columns": {
+            "provinces": {"boundary": {"name": "boundary", "enabled": True}},
+        },
+        "boundaries": {
+            "local_path": str(tmp_path),
+            "verify_checksum": True
+        }
+    }
+    
+    nus = Nusantara(config_dict)
+    nus.clear_cache()
+    
+    # Query bbox containing the centroid (5.5, 95.3)
+    res_centroid = nus.find_in_bbox(5.4, 95.2, 5.6, 95.4, level="provinces")
+    assert len(res_centroid) == 1
+    assert res_centroid[0].name == "Aceh"
+
+    # Query bbox outside centroid but intersecting the boundary polygon
+    # Polygon is [5.0, 95.0] to [6.0, 96.0].
+    # Bbox [5.1, 95.1] to [5.3, 95.2] does NOT contain the centroid (5.5, 95.3),
+    # but overlaps the boundary polygon.
+    res_boundary = nus.find_in_bbox(5.1, 95.1, 5.3, 95.2, level="provinces", use_boundary=True)
+    assert len(res_boundary) == 1
+    assert res_boundary[0].name == "Aceh"
+
+
+def test_async_database_seeding(tmp_path):
+    import asyncio
+    import gzip
+    import csv
+    from py_nusantara import build_models, NusantaraConfig
+    
+    # Set up mock cache file for boundary
+    mock_prov = tmp_path / "provinces.csv.gz"
+    headers = ["id", "name", "capital", "latitude", "longitude", "elevation", "timezone", "area", "population", "boundary"]
+    rows = [["11", "Aceh", "Banda Aceh", "5.5", "95.3", "12.0", "WIB", "56789.0", "5000000", "[[[5.5, 95.3], [5.6, 95.4], [5.5, 95.4], [5.5, 95.3]]]"]]
+    with gzip.open(mock_prov, "wt", newline="", encoding="utf-8") as f:
+        writer = csv.writer(f)
+        writer.writerow(headers)
+        writer.writerows(rows)
+
+    import hashlib
+    from py_nusantara.manifest import Manifest
+    sha = hashlib.sha256()
+    with open(mock_prov, "rb") as file_bin:
+        while chunk := file_bin.read(8192):
+            sha.update(chunk)
+    Manifest.HASHES["provinces.csv.gz"] = sha.hexdigest()
+
+    async def run_async_test():
+        from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+        from sqlalchemy.orm import declarative_base
+        
+        engine = create_async_engine("sqlite+aiosqlite:///:memory:")
+        
+        cfg = NusantaraConfig({
+            "columns": {
+                "provinces": {"boundary": {"name": "boundary", "enabled": True}}
+            },
+            "boundaries": {
+                "local_path": str(tmp_path),
+                "type": "text",  # Use text type to simplify SQLite testing
+            }
+        })
+        
+        Base = declarative_base()
+        models = build_models(Base, cfg)
+        
+        async with engine.begin() as conn:
+            await conn.run_sync(Base.metadata.create_all)
+            
+        from py_nusantara import NusantaraReader, NusantaraSeeder
+        reader = NusantaraReader(cfg)
+        
+        async_session = AsyncSession(engine)
+        
+        seeder = NusantaraSeeder(async_session, cfg, reader)
+        
+        # Test core async seeding
+        await seeder.seed_async()
+        
+        # Query database asynchronously to verify core seeding
+        from sqlalchemy import select
+        result = await async_session.execute(select(models["Province"]).filter_by(id="11"))
+        db_prov = result.scalar_one_or_none()
+        assert db_prov is not None
+        assert db_prov.name == "Aceh"
+        
+        # Test async boundaries seeding
+        await seeder.seed_boundaries_async(levels=["provinces"], force=True)
+        
+        result_b = await async_session.execute(select(models["Province"]).filter_by(id="11"))
+        db_prov_b = result_b.scalar_one_or_none()
+        assert db_prov_b.boundary is not None
+        assert "5.5" in db_prov_b.boundary
+        
+        await async_session.close()
+        await engine.dispose()
+
+    try:
+        import aiosqlite
+        asyncio.run(run_async_test())
+    except ImportError:
+        # If aiosqlite is not available in test environment, we pass
+        pass
+
+

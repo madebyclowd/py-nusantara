@@ -10,6 +10,24 @@ class BaseRecord:
         self._config = config
         self._facade = facade_ref
 
+    def __getstate__(self) -> Dict[str, Any]:
+        state = self.__dict__.copy()
+        state["_facade"] = None
+        return state
+
+    def __setstate__(self, state: Dict[str, Any]) -> None:
+        self.__dict__.update(state)
+
+    @property
+    def facade(self) -> Optional[Any]:
+        if self._facade is None:
+            try:
+                from py_nusantara import _get_instance
+                self._facade = _get_instance()
+            except ImportError:
+                pass
+        return self._facade
+
     def __getattr__(self, name: str) -> Any:
         # Check if the logical name matches
         db_name = self._config.resolve_column_name(self._level, name)
@@ -120,14 +138,16 @@ class ProvinceRecord(BaseRecord):
     @property
     def regencies(self) -> List["RegencyRecord"]:
         """Get all regencies belonging to this province."""
-        if not self._facade:
+        facade = self.facade
+        if not facade:
             return []
-        return self._facade.regencies_of(self.id)
+        return facade.regencies_of(self.id)
 
     @property
     def districts(self) -> List["DistrictRecord"]:
         """Get all districts belonging to this province through regencies."""
-        if not self._facade:
+        facade = self.facade
+        if not facade:
             return []
         districts = []
         for regency in self.regencies:
@@ -137,10 +157,11 @@ class ProvinceRecord(BaseRecord):
     @property
     def villages(self) -> List["VillageRecord"]:
         """Get all villages belonging to this province."""
-        if not self._facade:
+        facade = self.facade
+        if not facade:
             return []
         # Leverage partition: fetch villages directly by province ID
-        return self._facade.villages_of_province(self.id)
+        return facade.villages_of_province(self.id)
 
 
 class RegencyRecord(BaseRecord):
@@ -150,21 +171,24 @@ class RegencyRecord(BaseRecord):
     @property
     def province(self) -> Optional[ProvinceRecord]:
         """Get the province that owns this regency."""
-        if not self._facade:
+        facade = self.facade
+        if not facade:
             return None
-        return self._facade.find_province(self.province_id)
+        return facade.find_province(self.province_id)
 
     @property
     def districts(self) -> List["DistrictRecord"]:
         """Get all districts belonging to this regency."""
-        if not self._facade:
+        facade = self.facade
+        if not facade:
             return []
-        return self._facade.districts_of(self.id)
+        return facade.districts_of(self.id)
 
     @property
     def villages(self) -> List["VillageRecord"]:
         """Get all villages belonging to this regency through districts."""
-        if not self._facade:
+        facade = self.facade
+        if not facade:
             return []
         villages = []
         for district in self.districts:
@@ -190,23 +214,26 @@ class DistrictRecord(BaseRecord):
     @property
     def regency(self) -> Optional[RegencyRecord]:
         """Get the regency that owns this district."""
-        if not self._facade:
+        facade = self.facade
+        if not facade:
             return None
-        return self._facade.find_regency(self.regency_id)
+        return facade.find_regency(self.regency_id)
 
     @property
     def province(self) -> Optional[ProvinceRecord]:
         """Get the province that owns this district."""
-        if not self._facade:
+        facade = self.facade
+        if not facade:
             return None
-        return self._facade.find_province(self.id[:2])
+        return facade.find_province(self.id[:2])
 
     @property
     def villages(self) -> List["VillageRecord"]:
         """Get all villages belonging to this district."""
-        if not self._facade:
+        facade = self.facade
+        if not facade:
             return []
-        return self._facade.villages_of(self.id)
+        return facade.villages_of(self.id)
 
     @property
     def localized_type(self) -> str:
@@ -224,23 +251,26 @@ class VillageRecord(BaseRecord):
     @property
     def district(self) -> Optional[DistrictRecord]:
         """Get the district that owns this village."""
-        if not self._facade:
+        facade = self.facade
+        if not facade:
             return None
-        return self._facade.find_district(self.district_id)
+        return facade.find_district(self.district_id)
 
     @property
     def regency(self) -> Optional[RegencyRecord]:
         """Get the regency that owns this village."""
-        if not self._facade:
+        facade = self.facade
+        if not facade:
             return None
-        return self._facade.find_regency(self.id[:4])
+        return facade.find_regency(self.id[:4])
 
     @property
     def province(self) -> Optional[ProvinceRecord]:
         """Get the province that owns this village."""
-        if not self._facade:
+        facade = self.facade
+        if not facade:
             return None
-        return self._facade.find_province(self.id[:2])
+        return facade.find_province(self.id[:2])
 
     @property
     def is_kelurahan(self) -> bool:

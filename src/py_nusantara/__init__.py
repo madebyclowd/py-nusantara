@@ -28,6 +28,7 @@ from py_nusantara.search import NusantaraSearch
 from py_nusantara.db import build_models, NusantaraSeeder
 from py_nusantara.downloader import download_boundaries as _download_boundaries, json_to_wkt
 from py_nusantara.spatial import is_point_in_boundary, haversine_distance, _is_boundary_in_bbox
+from py_nusantara.query_adapter import InMemoryQueryAdapter, DatabaseQueryAdapter
 from py_nusantara.nik import (
     NIKInfo,
     parse_nik as _parse_nik,
@@ -98,7 +99,7 @@ __all__ = [
 class Nusantara:
     """The central access point (Facade) for py-nusantara administrative regions."""
 
-    def __init__(self, config_dict: Optional[Dict[str, Any]] = None) -> None:
+    def __init__(self, config_dict: Optional[Dict[str, Any]] = None, engine=None, session=None) -> None:
         self.config = NusantaraConfig(config_dict)
         self.reader = NusantaraReader(self.config)
         self.searcher = NusantaraSearch(self.config, self.reader)
@@ -107,11 +108,46 @@ class Nusantara:
         if not self.config.cache_enabled:
             self.cache = NoCache()
         elif self.config.redis_url:
-            self.cache = RedisCache(self.config.redis_url, prefix=self.config.cache_prefix)
+            use_pickle = self.config._config.get("cache", {}).get("redis_pickle", False)
+            serializer = "pickle" if use_pickle else "json"
+            self.cache = RedisCache(self.config.redis_url, prefix=self.config.cache_prefix, serializer=serializer)
         else:
             self.cache = InMemoryCache()
         
         self._spatial_indexes = {}
+        self.query_adapter = InMemoryQueryAdapter(self)
+
+        if engine is not None:
+            self.bind(engine)
+        elif session is not None:
+            self.bind(session)
+
+    def bind(self, engine_or_session: Any, models: Optional[Dict[str, Any]] = None) -> None:
+        """Bind a database engine or session to switch this facade to Database SQL mode."""
+        self.query_adapter = DatabaseQueryAdapter(self, engine_or_session, models=models)
+
+    def _get_shared_data(self, key: str, loader_fn: Any) -> Any:
+        shm_cfg = self.config._config.get("shared_memory", {})
+        shm_enabled = shm_cfg.get("enabled", False)
+        
+        cache_cfg = self.config._config.get("cache", {})
+        redis_pickled = cache_cfg.get("redis_url") is not None and cache_cfg.get("redis_pickle", False)
+        
+        if shm_enabled:
+            from py_nusantara.shared_memory import SharedMemoryCache
+            shm_cache = SharedMemoryCache(prefix=shm_cfg.get("prefix", "nusantara_shm"))
+            val = shm_cache.get(key)
+            if val is not None:
+                return val
+            computed = loader_fn()
+            shm_cache.set(key, computed)
+            return computed
+        elif redis_pickled:
+            from py_nusantara.cache import RedisCache
+            pickled_cache = RedisCache(self.config.redis_url, prefix=f"{self.config.cache_prefix}_pickled", serializer="pickle")
+            return pickled_cache.remember(key, self.config.cache_ttl, loader_fn)
+        else:
+            return loader_fn()
 
     def provinces(self) -> List[ProvinceRecord]:
         """Fetch all provinces."""
@@ -120,72 +156,58 @@ class Nusantara:
         return self.cache.remember(
             f"{prefix}.provinces",
             ttl,
-            lambda: [ProvinceRecord(r, self.config, self) for r in self.reader.read_provinces()]
+            lambda: self.query_adapter.provinces()
         )
 
     def find_province(self, id: str) -> Optional[ProvinceRecord]:
         """Fetch a specific province by ID."""
-        id_col = self.config.resolve_column_name("provinces", "id")
-        for p in self.provinces():
-            if getattr(p, id_col) == id:
-                return p
-        return None
+        prefix = self.config.cache_prefix
+        ttl = self.config.cache_ttl
+        return self.cache.remember(
+            f"{prefix}.province.{id}",
+            ttl,
+            lambda: self.query_adapter.find_province(id)
+        )
 
     def regencies_of(self, province_id: str) -> List[RegencyRecord]:
         """Fetch all regencies belonging to a province ID."""
         prefix = self.config.cache_prefix
         ttl = self.config.cache_ttl
-        prov_id_col = self.config.resolve_column_name("regencies", "province_id")
         return self.cache.remember(
             f"{prefix}.regencies.{province_id}",
             ttl,
-            lambda: [
-                RegencyRecord(r, self.config, self)
-                for r in self.reader.read_regencies()
-                if r.get(prov_id_col) == province_id
-            ]
+            lambda: self.query_adapter.regencies_of(province_id)
         )
 
     def find_regency(self, id: str) -> Optional[RegencyRecord]:
         """Fetch a specific regency by ID, falling back to historical mapping if obsolete."""
-        prov_id = id[:2]
-        id_col = self.config.resolve_column_name("regencies", "id")
-        for r in self.regencies_of(prov_id):
-            if getattr(r, id_col) == id:
-                return r
-        # Fallback to historical mapping
-        active_id = resolve_legacy_id(id)
-        if active_id != id:
-            return self.find_regency(active_id)
-        return None
+        prefix = self.config.cache_prefix
+        ttl = self.config.cache_ttl
+        return self.cache.remember(
+            f"{prefix}.regency.{id}",
+            ttl,
+            lambda: self.query_adapter.find_regency(id)
+        )
 
     def districts_of(self, regency_id: str) -> List[DistrictRecord]:
         """Fetch all districts belonging to a regency ID."""
         prefix = self.config.cache_prefix
         ttl = self.config.cache_ttl
-        reg_id_col = self.config.resolve_column_name("districts", "regency_id")
         return self.cache.remember(
             f"{prefix}.districts.{regency_id}",
             ttl,
-            lambda: [
-                DistrictRecord(r, self.config, self)
-                for r in self.reader.read_districts()
-                if r.get(reg_id_col) == regency_id
-            ]
+            lambda: self.query_adapter.districts_of(regency_id)
         )
 
     def find_district(self, id: str) -> Optional[DistrictRecord]:
         """Fetch a specific district by ID, falling back to historical mapping if obsolete."""
-        reg_id = id[:4]
-        id_col = self.config.resolve_column_name("districts", "id")
-        for d in self.districts_of(reg_id):
-            if getattr(d, id_col) == id:
-                return d
-        # Fallback to historical mapping
-        active_id = resolve_legacy_id(id)
-        if active_id != id:
-            return self.find_district(active_id)
-        return None
+        prefix = self.config.cache_prefix
+        ttl = self.config.cache_ttl
+        return self.cache.remember(
+            f"{prefix}.district.{id}",
+            ttl,
+            lambda: self.query_adapter.find_district(id)
+        )
 
     def villages_of(self, district_id: str) -> List[VillageRecord]:
         """Fetch all villages belonging to a district ID."""
@@ -194,10 +216,7 @@ class Nusantara:
         return self.cache.remember(
             f"{prefix}.villages.{district_id}",
             ttl,
-            lambda: [
-                VillageRecord(r, self.config, self)
-                for r in self.reader.read_villages(district_id=district_id)
-            ]
+            lambda: self.query_adapter.villages_of(district_id)
         )
 
     def villages_of_province(self, province_id: str) -> List[VillageRecord]:
@@ -207,29 +226,25 @@ class Nusantara:
         return self.cache.remember(
             f"{prefix}.province_villages.{province_id}",
             ttl,
-            lambda: [
-                VillageRecord(r, self.config, self)
-                for r in self.reader.read_villages(province_id=province_id)
-            ]
+            lambda: self.query_adapter.villages_of_province(province_id)
         )
 
     def find_village(self, id: str) -> Optional[VillageRecord]:
         """Fetch a specific village by ID, falling back to historical mapping if obsolete."""
-        dist_id = id[:6]
-        id_col = self.config.resolve_column_name("villages", "id")
-        for v in self.villages_of(dist_id):
-            if getattr(v, id_col) == id:
-                return v
-        # Fallback to historical mapping
-        active_id = resolve_legacy_id(id)
-        if active_id != id:
-            return self.find_village(active_id)
-        return None
+        prefix = self.config.cache_prefix
+        ttl = self.config.cache_ttl
+        return self.cache.remember(
+            f"{prefix}.village.{id}",
+            ttl,
+            lambda: self.query_adapter.find_village(id)
+        )
 
     def search(
         self,
         query: str,
         limit: int = 20,
+        offset: Optional[int] = None,
+        cursor: Optional[str] = None,
         scope: Optional[Dict[str, str]] = None,
         fuzzy: bool = False,
         threshold: float = 0.6,
@@ -245,22 +260,18 @@ class Nusantara:
             scope_str = "_".join(f"{k}:{v}" for k, v in sorted(scope.items()))
         
         def _execute_search():
-            raw_res = self.searcher.search(
+            return self.query_adapter.search(
                 query,
-                limit,
-                scope,
+                limit=limit,
+                offset=offset,
+                cursor=cursor,
+                scope=scope,
                 fuzzy=fuzzy,
                 threshold=threshold,
                 similarity_method=similarity_method,
             )
-            return {
-                "provinces": [ProvinceRecord(r, self.config, self) for r in raw_res["provinces"]],
-                "regencies": [RegencyRecord(r, self.config, self) for r in raw_res["regencies"]],
-                "districts": [DistrictRecord(r, self.config, self) for r in raw_res["districts"]],
-                "villages": [VillageRecord(r, self.config, self) for r in raw_res["villages"]],
-            }
 
-        cache_key = f"{prefix}.search.{query}.{limit}.{scope_str}.{fuzzy}.{threshold}.{similarity_method}"
+        cache_key = f"{prefix}.search.{query}.{limit}.{offset}.{cursor}.{scope_str}.{fuzzy}.{threshold}.{similarity_method}"
         return self.cache.remember(
             cache_key,
             ttl,
@@ -281,105 +292,22 @@ class Nusantara:
         """
         prefix = self.config.cache_prefix
         ttl = self.config.cache_ttl
-        
-        def _execute_resolve():
-            res: Dict[str, Optional[BaseRecord]] = {
-                "province": None,
-                "regency": None,
-                "district": None,
-                "village": None,
-            }
-            
-            def _find_nearest(records: List[Any]) -> Optional[Any]:
-                nearest = None
-                min_dist = float("inf")
-                for r in records:
-                    r_lat = getattr(r, "latitude", None)
-                    r_lon = getattr(r, "longitude", None)
-                    if r_lat is not None and r_lon is not None:
-                        try:
-                            dist = haversine_distance(latitude, longitude, float(r_lat), float(r_lon))
-                            if dist < min_dist:
-                                min_dist = dist
-                                nearest = r
-                        except (ValueError, TypeError):
-                            pass
-                return nearest
-
-            # 1. Resolve Province
-            prov_records = self.provinces()
-            matched_prov = None
-            
-            for p in prov_records:
-                boundary_val = getattr(p, "boundary", None)
-                if boundary_val and is_point_in_boundary(latitude, longitude, boundary_val):
-                    matched_prov = p
-                    break
-                    
-            if not matched_prov and fallback_to_nearest:
-                matched_prov = _find_nearest(prov_records)
-                
-            if not matched_prov:
-                return res
-            res["province"] = matched_prov
-
-            # 2. Resolve Regency
-            reg_records = self.regencies_of(matched_prov.id)
-            matched_reg = None
-            for r in reg_records:
-                boundary_val = getattr(r, "boundary", None)
-                if boundary_val and is_point_in_boundary(latitude, longitude, boundary_val):
-                    matched_reg = r
-                    break
-                    
-            if not matched_reg and fallback_to_nearest:
-                matched_reg = _find_nearest(reg_records)
-                
-            if not matched_reg:
-                return res
-            res["regency"] = matched_reg
-
-            # 3. Resolve District
-            dist_records = self.districts_of(matched_reg.id)
-            matched_dist = None
-            for d in dist_records:
-                boundary_val = getattr(d, "boundary", None)
-                if boundary_val and is_point_in_boundary(latitude, longitude, boundary_val):
-                    matched_dist = d
-                    break
-                    
-            if not matched_dist and fallback_to_nearest:
-                matched_dist = _find_nearest(dist_records)
-                
-            if not matched_dist:
-                return res
-            res["district"] = matched_dist
-
-            # 4. Resolve Village
-            vil_records = self.villages_of(matched_dist.id)
-            matched_vil = None
-            for v in vil_records:
-                boundary_val = getattr(v, "boundary", None)
-                if boundary_val and is_point_in_boundary(latitude, longitude, boundary_val):
-                    matched_vil = v
-                    break
-                    
-            if not matched_vil and fallback_to_nearest:
-                matched_vil = _find_nearest(vil_records)
-                
-            res["village"] = matched_vil
-            return res
-
         return self.cache.remember(
             f"{prefix}.coord.{latitude}.{longitude}.{fallback_to_nearest}",
             ttl,
-            _execute_resolve
+            lambda: self.query_adapter.find_by_coordinate(latitude, longitude, fallback_to_nearest)
         )
 
     def clear_cache(self) -> None:
         """Clear all cached queries."""
         self.cache.clear()
         self._spatial_indexes.clear()
+        
+        shm_enabled = self.config._config.get("shared_memory", {}).get("enabled", False)
+        if shm_enabled:
+            from py_nusantara.shared_memory import SharedMemoryCache
+            shm_cache = SharedMemoryCache(prefix=self.config._config.get("shared_memory", {}).get("prefix", "nusantara_shm"))
+            shm_cache.unlink_all()
 
     # --- Boundaries On-Demand Helpers ---
     def download_boundaries(
@@ -470,17 +398,19 @@ class Nusantara:
 
     def _get_spatial_index(self, level: str) -> Any:
         if level not in self._spatial_indexes:
-            records = []
-            if level == "provinces":
-                records = self.provinces()
-            elif level == "regencies":
-                records = [RegencyRecord(r, self.config, self) for r in self.reader.read_regencies()]
-            elif level == "districts":
-                records = [DistrictRecord(r, self.config, self) for r in self.reader.read_districts()]
-            elif level == "villages":
-                records = [VillageRecord(r, self.config, self) for r in self.reader.stream_all_villages()]
-            from py_nusantara.spatial import KDTree
-            self._spatial_indexes[level] = KDTree(records)
+            def _build_tree():
+                records = []
+                if level == "provinces":
+                    records = self.provinces()
+                elif level == "regencies":
+                    records = [RegencyRecord(r, self.config, self) for r in self.reader.read_regencies()]
+                elif level == "districts":
+                    records = [DistrictRecord(r, self.config, self) for r in self.reader.read_districts()]
+                elif level == "villages":
+                    records = [VillageRecord(r, self.config, self) for r in self.reader.stream_all_villages()]
+                from py_nusantara.spatial import KDTree
+                return KDTree(records)
+            self._spatial_indexes[level] = self._get_shared_data(f"kdtree_{level}", _build_tree)
         return self._spatial_indexes[level]
 
     def find_nearby(
@@ -610,7 +540,7 @@ class Nusantara:
         return self.cache.remember(
             f"{prefix}.bbox.{min_lat}.{min_lon}.{max_lat}.{max_lon}.{level}.{use_boundary}",
             ttl,
-            lambda: self._execute_find_in_bbox(min_lat, min_lon, max_lat, max_lon, level, use_boundary)
+            lambda: self.query_adapter.find_in_bbox(min_lat, min_lon, max_lat, max_lon, level, use_boundary)
         )
 
     def _execute_find_in_bbox(
@@ -742,6 +672,8 @@ def find_village(id: str) -> Optional[VillageRecord]:
 def search(
     query: str,
     limit: int = 20,
+    offset: Optional[int] = None,
+    cursor: Optional[str] = None,
     scope: Optional[Dict[str, str]] = None,
     fuzzy: bool = False,
     threshold: float = 0.6,
@@ -750,6 +682,8 @@ def search(
     return _get_instance().search(
         query,
         limit,
+        offset=offset,
+        cursor=cursor,
         scope=scope,
         fuzzy=fuzzy,
         threshold=threshold,

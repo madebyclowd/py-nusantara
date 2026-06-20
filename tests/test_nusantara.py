@@ -1145,3 +1145,125 @@ def test_async_database_seeding(tmp_path):
         pass
 
 
+def test_search_pagination():
+    from py_nusantara import search
+    res1 = search("Aceh", limit=5)
+    assert len(res1["provinces"]) > 0 or len(res1["regencies"]) > 0
+    
+    res_offset = search("Aceh", limit=5, offset=1)
+    
+    if res1["provinces"]:
+        first_id = res1["provinces"][0].id
+        res_cursor = search("Aceh", limit=5, cursor=first_id)
+        for p in res_cursor["provinces"]:
+            assert p.id > first_id
+
+
+def test_database_query_adapter():
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import sessionmaker, declarative_base
+    from py_nusantara import Nusantara, build_models, NusantaraSeeder
+    
+    engine = create_engine("sqlite:///:memory:")
+    Session = sessionmaker(bind=engine)
+    session = Session()
+    
+    Base = declarative_base()
+    nus = Nusantara()
+    models = build_models(Base, nus.config)
+    Base.metadata.create_all(engine)
+    
+    seeder = NusantaraSeeder(session, nus.config, nus.reader)
+    seeder.seed()
+    
+    # Bind engine
+    nus.bind(engine)
+    
+    # Test queries
+    provs = nus.provinces()
+    assert len(provs) > 0
+    
+    aceh = nus.find_province("11")
+    assert aceh is not None
+    assert aceh.name == "Aceh"
+    
+    regencies = nus.regencies_of("11")
+    assert len(regencies) > 0
+    
+    search_res = nus.search("Aceh")
+    assert len(search_res["provinces"]) > 0
+    
+    bbox_res = nus.find_in_bbox(5.4, 95.2, 5.6, 95.4, level="provinces")
+    assert len(bbox_res) > 0
+    
+    coord_res = nus.find_by_coordinate(5.5, 95.3, fallback_to_nearest=True)
+    assert coord_res["province"] is not None
+    assert coord_res["province"].name == "Aceh"
+    
+    session.close()
+
+
+def test_shared_memory_cache():
+    from py_nusantara.shared_memory import SharedMemoryCache
+    cache = SharedMemoryCache(prefix="test_nusantara_shm")
+    test_obj = {"key": "value", "list": [1, 2, 3]}
+    cache.set("test_key", test_obj)
+    
+    retrieved = cache.get("test_key")
+    assert retrieved == test_obj
+    
+    cache.unlink("test_key")
+    assert cache.get("test_key") is None
+
+
+def test_pickled_redis_cache():
+    from py_nusantara.cache import RedisCache
+    
+    class MockRedisClient:
+        def __init__(self):
+            self.store = {}
+        def get(self, key):
+            return self.store.get(key)
+        def setex(self, key, ttl, val):
+            self.store[key] = val
+            
+    import sys
+    from types import ModuleType
+    mock_redis_module = ModuleType("redis")
+    mock_redis_module.from_url = lambda url, **kwargs: MockRedisClient()
+    
+    orig_redis = sys.modules.get("redis")
+    sys.modules["redis"] = mock_redis_module
+    
+    try:
+        cache = RedisCache("redis://localhost:6379", serializer="pickle")
+        test_obj = {"hello": "world"}
+        cache.set("test_pickled", test_obj, 3600)
+        
+        raw_val = cache._client.store["test_pickled"]
+        assert isinstance(raw_val, bytes)
+        
+        retrieved = cache.get("test_pickled")
+        assert retrieved == test_obj
+    finally:
+        if orig_redis:
+            sys.modules["redis"] = orig_redis
+        elif "redis" in sys.modules:
+            del sys.modules["redis"]
+
+
+def test_record_pickling():
+    import pickle
+    from py_nusantara import find_province
+    aceh = find_province("11")
+    assert aceh is not None
+    
+    dumped = pickle.dumps(aceh)
+    loaded = pickle.loads(dumped)
+    
+    assert loaded.id == "11"
+    assert loaded.name == "Aceh"
+    assert len(loaded.regencies) > 0
+
+
+

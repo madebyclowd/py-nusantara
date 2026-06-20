@@ -73,12 +73,14 @@ class InMemoryCache(BaseCache):
 class RedisCache(BaseCache):
     """Redis-backed cache with TTL support."""
 
-    def __init__(self, redis_url: str, prefix: Optional[str] = None) -> None:
+    def __init__(self, redis_url: str, prefix: Optional[str] = None, serializer: str = "json") -> None:
         self.redis_url = redis_url
         self.prefix = prefix
+        self.serializer = serializer
         try:
             import redis
-            self._client = redis.from_url(redis_url, decode_responses=True)
+            decode = serializer != "pickle"
+            self._client = redis.from_url(redis_url, decode_responses=decode)
         except ImportError:
             raise ImportError(
                 "The 'redis' package is required to use RedisCache. "
@@ -89,6 +91,9 @@ class RedisCache(BaseCache):
         try:
             val = self._client.get(key)
             if val is not None:
+                if self.serializer == "pickle":
+                    import pickle
+                    return pickle.loads(val)
                 return json.loads(val)
         except Exception as e:
             logger.debug(f"Redis cache get failed for key '{key}': {e}")
@@ -96,7 +101,11 @@ class RedisCache(BaseCache):
 
     def set(self, key: str, value: Any, ttl: int) -> None:
         try:
-            serialized = json.dumps(value)
+            if self.serializer == "pickle":
+                import pickle
+                serialized = pickle.dumps(value)
+            else:
+                serialized = json.dumps(value)
             self._client.setex(key, ttl, serialized)
         except Exception as e:
             logger.debug(f"Redis cache set failed for key '{key}': {e}")

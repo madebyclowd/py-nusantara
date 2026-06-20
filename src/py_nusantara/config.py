@@ -63,6 +63,11 @@ class NusantaraConfig:
             "ttl": 86400,
             "prefix": "nusantara",
             "redis_url": None, # e.g. "redis://localhost:6379/0"
+            "redis_pickle": False,
+        },
+        "shared_memory": {
+            "enabled": False,
+            "prefix": "nusantara_shm",
         },
         "boundaries": {
             "cdn_url": "https://data.clowdlab.com",

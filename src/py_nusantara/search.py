@@ -15,6 +15,8 @@ class NusantaraSearch:
         self,
         query: str,
         limit: int = 20,
+        offset: Optional[int] = None,
+        cursor: Optional[str] = None,
         scope: Optional[Dict[str, str]] = None,
         fuzzy: bool = False,
         threshold: float = 0.6,
@@ -52,6 +54,7 @@ class NusantaraSearch:
         dist_reg_id_col = self.config.resolve_column_name("districts", "regency_id")
         dist_name_col = self.config.resolve_column_name("districts", "name")
 
+        vil_id_col = self.config.resolve_column_name("villages", "id")
         vil_dist_id_col = self.config.resolve_column_name("villages", "district_id")
         vil_name_col = self.config.resolve_column_name("villages", "name")
 
@@ -106,12 +109,16 @@ class NusantaraSearch:
                 else:
                     if q_lower in name_val.lower():
                         prov_candidates.append((1.0, p))
-                        if len(prov_candidates) >= limit:
+                        # We cannot break early if cursor or fuzzy sorting is active
+                        if not cursor and len(prov_candidates) >= (offset or 0) + limit:
                             break
             
+            if cursor:
+                prov_candidates = [c for c in prov_candidates if c[1].get(prov_id_col) > cursor]
             if fuzzy:
                 prov_candidates.sort(key=lambda x: x[0], reverse=True)
-            results["provinces"] = [c[1] for c in prov_candidates[:limit]]
+            start_idx = offset or 0
+            results["provinces"] = [c[1] for c in prov_candidates[start_idx : start_idx + limit]]
 
         # 2. Search Regencies (Only search if scope is not constrained below regency level)
         if not scope_dist:
@@ -135,12 +142,15 @@ class NusantaraSearch:
                 else:
                     if q_lower in name_val.lower():
                         reg_candidates.append((1.0, r))
-                        if len(reg_candidates) >= limit:
+                        if not cursor and len(reg_candidates) >= (offset or 0) + limit:
                             break
             
+            if cursor:
+                reg_candidates = [c for c in reg_candidates if c[1].get(reg_id_col) > cursor]
             if fuzzy:
                 reg_candidates.sort(key=lambda x: x[0], reverse=True)
-            results["regencies"] = [c[1] for c in reg_candidates[:limit]]
+            start_idx = offset or 0
+            results["regencies"] = [c[1] for c in reg_candidates[start_idx : start_idx + limit]]
 
         # 3. Search Districts
         dist_candidates = []
@@ -165,12 +175,15 @@ class NusantaraSearch:
             else:
                 if q_lower in name_val.lower():
                     dist_candidates.append((1.0, d))
-                    if len(dist_candidates) >= limit:
+                    if not cursor and len(dist_candidates) >= (offset or 0) + limit:
                         break
         
+        if cursor:
+            dist_candidates = [c for c in dist_candidates if c[1].get(dist_id_col) > cursor]
         if fuzzy:
             dist_candidates.sort(key=lambda x: x[0], reverse=True)
-        results["districts"] = [c[1] for c in dist_candidates[:limit]]
+        start_idx = offset or 0
+        results["districts"] = [c[1] for c in dist_candidates[start_idx : start_idx + limit]]
 
         # 4. Search Villages (Optimize read using partitions if scoped)
         if scope_dist:
@@ -204,12 +217,15 @@ class NusantaraSearch:
             else:
                 if q_lower in name_val.lower():
                     vil_candidates.append((1.0, v))
-                    if len(vil_candidates) >= limit:
+                    if not cursor and len(vil_candidates) >= (offset or 0) + limit:
                         break
         
+        if cursor:
+            vil_candidates = [c for c in vil_candidates if c[1].get(vil_id_col) > cursor]
         if fuzzy:
             vil_candidates.sort(key=lambda x: x[0], reverse=True)
-        results["villages"] = [c[1] for c in vil_candidates[:limit]]
+        start_idx = offset or 0
+        results["villages"] = [c[1] for c in vil_candidates[start_idx : start_idx + limit]]
 
         return results
 

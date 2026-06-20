@@ -45,3 +45,60 @@ def validate_region_code(code: str) -> bool:
         return len(clean_code) in (2, 4, 6, 10)
     except (TypeError, ValueError):
         return False
+
+
+def levenshtein_distance(s1: str, s2: str) -> int:
+    """Calculate the Levenshtein distance between two strings."""
+    if len(s1) < len(s2):
+        return levenshtein_distance(s2, s1)
+    if len(s2) == 0:
+        return len(s1)
+    
+    previous_row = list(range(len(s2) + 1))
+    for i, c1 in enumerate(s1):
+        current_row = [i + 1]
+        for j, c2 in enumerate(s2):
+            insertions = previous_row[j + 1] + 1
+            deletions = current_row[j] + 1
+            substitutions = previous_row[j] + (c1 != c2)
+            current_row.append(min(insertions, deletions, substitutions))
+        previous_row = current_row
+    return previous_row[-1]
+
+
+def trigram_similarity(s1: str, s2: str) -> float:
+    """Calculate the trigram Jaccard similarity between two strings."""
+    s1_lower = s1.lower()
+    s2_lower = s2.lower()
+    if s1_lower == s2_lower:
+        return 1.0
+    if len(s1_lower) < 3 or len(s2_lower) < 3:
+        # Fallback to normalized edit distance
+        dist = levenshtein_distance(s1_lower, s2_lower)
+        max_len = max(len(s1_lower), len(s2_lower), 1)
+        return 1.0 - (dist / max_len)
+
+    t1 = {s1_lower[i:i+3] for i in range(len(s1_lower) - 2)}
+    t2 = {s2_lower[i:i+3] for i in range(len(s2_lower) - 2)}
+    intersection = t1.intersection(t2)
+    union = t1.union(t2)
+    if not union:
+        return 0.0
+    return len(intersection) / len(union)
+
+
+def string_similarity(s1: str, s2: str, method: str = "levenshtein") -> float:
+    """Calculate similarity between two strings [0.0 - 1.0] using the specified method."""
+    if not s1 or not s2:
+        return 0.0
+    s1_lower = s1.strip().lower()
+    s2_lower = s2.strip().lower()
+    
+    if method == "trigram":
+        return trigram_similarity(s1_lower, s2_lower)
+    
+    # Default is normalized Levenshtein
+    dist = levenshtein_distance(s1_lower, s2_lower)
+    max_len = max(len(s1_lower), len(s2_lower), 1)
+    return 1.0 - (dist / max_len)
+

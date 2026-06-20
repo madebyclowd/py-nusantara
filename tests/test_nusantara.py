@@ -849,8 +849,146 @@ def test_historical_split_mapping_and_resolution():
     assert info.district.name == "Merauke"
 
 
+def test_spatial_index_kd_tree():
+    from py_nusantara.spatial import KDTree, latlon_to_3d
+    from py_nusantara.records import ProvinceRecord
+    from py_nusantara.config import NusantaraConfig
+    import math
+
+    cfg = NusantaraConfig()
+    p1 = ProvinceRecord({"id": "11", "name": "Aceh", "latitude": "5.5", "longitude": "95.3"}, cfg)
+    p2 = ProvinceRecord({"id": "12", "name": "North Sumatra", "latitude": "2.1", "longitude": "99.1"}, cfg)
+    p3 = ProvinceRecord({"id": "13", "name": "West Sumatra", "latitude": "-0.9", "longitude": "100.3"}, cfg)
+
+    tree = KDTree([p1, p2, p3])
+    
+    q_lat, q_lon = 5.4, 95.2
+    q_3d = latlon_to_3d(q_lat, q_lon)
+    
+    r_3d = 2.0 * math.sin((50.0 / 6371.0) / 2.0)
+    res_radius = tree.query_radius(q_3d, r_3d)
+    assert len(res_radius) == 1
+    assert res_radius[0][1].name == "Aceh"
+
+    res_knn = tree.query_knn(q_3d, 2)
+    assert len(res_knn) == 2
+    assert res_knn[0][1].name == "Aceh"
+    assert res_knn[1][1].name == "North Sumatra"
 
 
+def test_find_knn_api():
+    from py_nusantara import find_knn
+    res = find_knn(5.54, 95.32, k=3, level="provinces")
+    assert len(res) == 3
+    assert res[0].name == "Aceh"
+    assert hasattr(res[0], "distance_km")
+    assert res[0].distance_km <= res[1].distance_km
+    assert res[1].distance_km <= res[2].distance_km
 
 
+def test_to_geojson():
+    from py_nusantara.records import ProvinceRecord
+    from py_nusantara.config import NusantaraConfig
+    
+    cfg = NusantaraConfig({
+        "columns": {
+            "provinces": {
+                "boundary": {"name": "boundary", "enabled": True}
+            }
+        }
+    })
+    
+    p_point = ProvinceRecord({
+        "id": "11",
+        "name": "Aceh",
+        "capital": "Banda Aceh",
+        "latitude": "5.5",
+        "longitude": "95.3",
+        "boundary": None
+    }, cfg)
+    
+    geojson = p_point.to_geojson()
+    assert geojson["type"] == "Feature"
+    assert geojson["geometry"]["type"] == "Point"
+    assert geojson["geometry"]["coordinates"] == [95.3, 5.5]
+    assert geojson["properties"]["name"] == "Aceh"
+    assert "boundary" not in geojson["properties"]
+
+    p_json = ProvinceRecord({
+        "id": "11",
+        "name": "Aceh",
+        "latitude": "5.5",
+        "longitude": "95.3",
+        "boundary": "[[[5.5, 95.3], [5.6, 95.4], [5.5, 95.4], [5.5, 95.3]]]"
+    }, cfg)
+    geojson_json = p_json.to_geojson()
+    assert geojson_json["geometry"]["type"] == "Polygon"
+    assert geojson_json["geometry"]["coordinates"] == [[[95.3, 5.5], [95.4, 5.6], [95.4, 5.5], [95.3, 5.5]]]
+
+    p_wkt = ProvinceRecord({
+        "id": "11",
+        "name": "Aceh",
+        "latitude": "5.5",
+        "longitude": "95.3",
+        "boundary": "POLYGON((95.3 5.5, 95.4 5.6, 95.4 5.5, 95.3 5.5))"
+    }, cfg)
+    geojson_wkt = p_wkt.to_geojson()
+    assert geojson_wkt["geometry"]["type"] == "Polygon"
+    assert geojson_wkt["geometry"]["coordinates"] == [[[95.3, 5.5], [95.4, 5.6], [95.4, 5.5], [95.3, 5.5]]]
+
+
+def test_geoalchemy2_orm_integration():
+    import sys
+    from types import ModuleType
+    from sqlalchemy import create_engine
+    from sqlalchemy.orm import declarative_base, sessionmaker
+    from py_nusantara import build_models, NusantaraConfig
+
+    original_geoalchemy2 = sys.modules.get("geoalchemy2")
+    
+    import sqlalchemy.types as satypes
+    mock_ga = ModuleType("geoalchemy2")
+    class MockGeometry(satypes.UserDefinedType):
+        def __init__(self, geometry_type="GEOMETRY", srid=4326):
+            self.geometry_type = geometry_type
+            self.srid = srid
+    mock_ga.Geometry = MockGeometry
+    sys.modules["geoalchemy2"] = mock_ga
+
+    try:
+        cfg = NusantaraConfig({
+            "columns": {
+                "provinces": {"boundary": {"name": "boundary", "enabled": True}}
+            },
+            "boundaries": {
+                "use_geoalchemy2": True
+            }
+        })
+        
+        Base = declarative_base()
+        models = build_models(Base, cfg)
+        
+        assert models["Province"].boundary is not None
+        assert isinstance(models["Province"].boundary.type, MockGeometry)
+        assert models["Province"].boundary.type.geometry_type == "GEOMETRY"
+        assert models["Province"].boundary.type.srid == 4326
+
+        prov = models["Province"](
+            id="11",
+            name="Aceh",
+            latitude=5.5,
+            longitude=95.3,
+            boundary="POLYGON((95.3 5.5, 95.4 5.6, 95.4 5.5, 95.3 5.5))"
+        )
+        geojson = prov.to_geojson()
+        assert geojson["type"] == "Feature"
+        assert geojson["geometry"]["type"] == "Polygon"
+        assert geojson["geometry"]["coordinates"] == [[[95.3, 5.5], [95.4, 5.6], [95.4, 5.5], [95.3, 5.5]]]
+        assert geojson["properties"]["name"] == "Aceh"
+
+    finally:
+        if original_geoalchemy2:
+            sys.modules["geoalchemy2"] = original_geoalchemy2
+        elif "geoalchemy2" in sys.modules:
+            del sys.modules["geoalchemy2"]
 

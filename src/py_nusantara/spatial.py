@@ -1,6 +1,7 @@
 import math
 import json
 import logging
+import heapq
 from typing import Any, List, Optional
 
 logger = logging.getLogger("py_nusantara")
@@ -87,3 +88,226 @@ def point_in_polygon(x: float, y: float, polygon: List[List[List[float]]]) -> bo
                             inside = not inside
             p1x, p1y = p2x, p2y
     return inside
+
+
+def latlon_to_3d(lat: float, lon: float) -> tuple[float, float, float]:
+    """Convert latitude and longitude (in degrees) to 3D Cartesian coordinates on unit sphere."""
+    rad_lat = math.radians(lat)
+    rad_lon = math.radians(lon)
+    x = math.cos(rad_lat) * math.cos(rad_lon)
+    y = math.cos(rad_lat) * math.sin(rad_lon)
+    z = math.sin(rad_lat)
+    return (x, y, z)
+
+
+class KDNode:
+    """A node in the 3D KD-Tree."""
+    def __init__(self, point: tuple[float, float, float], item: Any, axis: int, left=None, right=None):
+        self.point = point   # (x, y, z)
+        self.item = item     # The record/object associated with this point
+        self.axis = axis
+        self.left = left
+        self.right = right
+
+
+class KDTree:
+    """A 3D KD-Tree for querying spatial coordinates on a unit sphere."""
+    def __init__(self, items: list[Any]):
+        """Build a 3D KD-Tree from a list of records.
+
+        Each item must have 'latitude' and 'longitude' attributes.
+        """
+        valid_items = []
+        for item in items:
+            lat = getattr(item, "latitude", None)
+            lon = getattr(item, "longitude", None)
+            if lat is not None and lon is not None:
+                try:
+                    pt_3d = latlon_to_3d(float(lat), float(lon))
+                    valid_items.append((pt_3d, item))
+                except (ValueError, TypeError):
+                    pass
+        self.root = self._build(valid_items, 0)
+
+    def _build(self, points: list[tuple[tuple[float, float, float], Any]], depth: int) -> Optional[KDNode]:
+        if not points:
+            return None
+        axis = depth % 3
+        points.sort(key=lambda x: x[0][axis])
+        median_idx = len(points) // 2
+        pt_3d, item = points[median_idx]
+        return KDNode(
+            point=pt_3d,
+            item=item,
+            axis=axis,
+            left=self._build(points[:median_idx], depth + 1),
+            right=self._build(points[median_idx + 1:], depth + 1)
+        )
+
+    def query_radius(self, query_pt_3d: tuple[float, float, float], radius_3d: float) -> list[tuple[float, Any]]:
+        """Find all nodes within the given 3D Euclidean distance (radius_3d).
+
+        Returns a list of tuples: (distance_3d, item).
+        """
+        results = []
+        self._query_radius_rec(self.root, query_pt_3d, radius_3d, results)
+        return results
+
+    def _query_radius_rec(self, node: Optional[KDNode], query: tuple[float, float, float], r: float, results: list):
+        if node is None:
+            return
+        dist_sq = sum((q - n) ** 2 for q, n in zip(query, node.point))
+        dist = math.sqrt(dist_sq)
+        if dist <= r:
+            results.append((dist, node.item))
+        axis = node.axis
+        axis_dist = query[axis] - node.point[axis]
+        if axis_dist < 0:
+            self._query_radius_rec(node.left, query, r, results)
+            if abs(axis_dist) < r:
+                self._query_radius_rec(node.right, query, r, results)
+        else:
+            self._query_radius_rec(node.right, query, r, results)
+            if abs(axis_dist) < r:
+                self._query_radius_rec(node.left, query, r, results)
+
+    def query_knn(self, query_pt_3d: tuple[float, float, float], k: int) -> list[tuple[float, Any]]:
+        """Find the K nearest neighbors to the query point.
+
+        Returns a list of tuples: (distance_3d, item), sorted by distance ascending.
+        """
+        if k <= 0 or self.root is None:
+            return []
+        # Max-heap to store the k closest points.
+        # Elements are: (-distance_3d, id(item), item) to avoid comparing items directly.
+        heap = []
+        self._query_knn_rec(self.root, query_pt_3d, k, heap)
+        results = [(-dist, item) for dist, _, item in heap]
+        results.sort(key=lambda x: x[0])
+        return results
+
+    def _query_knn_rec(self, node: Optional[KDNode], query: tuple[float, float, float], k: int, heap: list):
+        if node is None:
+            return
+        dist_sq = sum((q - n) ** 2 for q, n in zip(query, node.point))
+        dist = math.sqrt(dist_sq)
+        if len(heap) < k:
+            heapq.heappush(heap, (-dist, id(node.item), node.item))
+        else:
+            worst_dist = -heap[0][0]
+            if dist < worst_dist:
+                heapq.heapreplace(heap, (-dist, id(node.item), node.item))
+        axis = node.axis
+        axis_dist = query[axis] - node.point[axis]
+        if axis_dist < 0:
+            closer_child = node.left
+            farther_child = node.right
+        else:
+            closer_child = node.right
+            farther_child = node.left
+        self._query_knn_rec(closer_child, query, k, heap)
+        worst_dist = -heap[0][0] if len(heap) == k else float("inf")
+        if abs(axis_dist) < worst_dist:
+            self._query_knn_rec(farther_child, query, k, heap)
+
+
+def swap_lat_lon(coords: Any) -> Any:
+    """Recursively swap [latitude, longitude] arrays to [longitude, latitude] for GeoJSON."""
+    if isinstance(coords, list):
+        if len(coords) == 2 and not isinstance(coords[0], list):
+            return [coords[1], coords[0]]
+        return [swap_lat_lon(c) for c in coords]
+    return coords
+
+
+def parse_wkt(wkt_str: str) -> Optional[dict[str, Any]]:
+    """Parse POLYGON and MULTIPOLYGON WKT strings into GeoJSON geometry structures."""
+    import re
+    wkt_str = wkt_str.strip().upper()
+    if wkt_str.startswith("POLYGON"):
+        rings_str = re.findall(r"\(([^()]+)\)", wkt_str)
+        rings = []
+        for r_str in rings_str:
+            coords = []
+            for pt in r_str.split(","):
+                parts = pt.strip().split()
+                if len(parts) >= 2:
+                    try:
+                        coords.append([float(parts[0]), float(parts[1])])
+                    except ValueError:
+                        pass
+            if coords:
+                rings.append(coords)
+        if rings:
+            return {"type": "Polygon", "coordinates": rings}
+    elif wkt_str.startswith("MULTIPOLYGON"):
+        poly_matches = re.findall(r"\(\(([^()]+(?:\)\s*,\s*\([^()]+)*)\)\)", wkt_str)
+        polygons = []
+        for p_str in poly_matches:
+            rings_str = re.findall(r"\(([^()]+)\)", f"({p_str})")
+            rings = []
+            for r_str in rings_str:
+                coords = []
+                for pt in r_str.split(","):
+                    parts = pt.strip().split()
+                    if len(parts) >= 2:
+                        try:
+                            coords.append([float(parts[0]), float(parts[1])])
+                        except ValueError:
+                            pass
+                if coords:
+                    rings.append(coords)
+            if rings:
+                polygons.append(rings)
+        if polygons:
+            return {"type": "MultiPolygon", "coordinates": polygons}
+    return None
+
+
+def parse_boundary_to_geojson_geometry(boundary_val: Any) -> Optional[dict[str, Any]]:
+    """Parse boundary value (JSON coordinate string, WKT string, list, or GeoAlchemy2 element) into GeoJSON."""
+    if not boundary_val:
+        return None
+
+    # Check if it is a GeoAlchemy2 SpatialElement / WKBElement / WKTElement
+    cls_name = boundary_val.__class__.__name__
+    if cls_name in ("WKBElement", "WKTElement", "SpatialElement"):
+        try:
+            from geoalchemy2.shape import to_shape
+            import shapely.geometry
+            shape = to_shape(boundary_val)
+            return shapely.geometry.mapping(shape)
+        except Exception:
+            if hasattr(boundary_val, "data") and isinstance(boundary_val.data, str):
+                boundary_val = boundary_val.data
+            elif hasattr(boundary_val, "desc") and isinstance(boundary_val.desc, str):
+                # We can try reading from desc (WKB hex) using shapely directly
+                try:
+                    import shapely.wkb
+                    shape = shapely.wkb.loads(bytes.fromhex(boundary_val.desc))
+                    return shapely.geometry.mapping(shape)
+                except Exception:
+                    pass
+
+    if isinstance(boundary_val, str):
+        boundary_val = boundary_val.strip()
+        if boundary_val.startswith("["):
+            try:
+                coords = json.loads(boundary_val)
+                depth = _get_array_depth(coords)
+                geom_type = "Polygon" if depth == 3 else "MultiPolygon"
+                swapped = swap_lat_lon(coords)
+                return {"type": geom_type, "coordinates": swapped}
+            except Exception:
+                return None
+        elif boundary_val.upper().startswith(("POLYGON", "MULTIPOLYGON")):
+            return parse_wkt(boundary_val)
+
+    if isinstance(boundary_val, list):
+        depth = _get_array_depth(boundary_val)
+        geom_type = "Polygon" if depth == 3 else "MultiPolygon"
+        swapped = swap_lat_lon(boundary_val)
+        return {"type": geom_type, "coordinates": swapped}
+
+    return None
+

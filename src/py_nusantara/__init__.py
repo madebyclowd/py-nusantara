@@ -88,6 +88,7 @@ __all__ = [
     "format_region_code",
     "validate_region_code",
     "find_nearby",
+    "find_knn",
     "resolve_legacy_id",
 ]
 
@@ -107,6 +108,8 @@ class Nusantara:
             self.cache = RedisCache(self.config.redis_url, prefix=self.config.cache_prefix)
         else:
             self.cache = InMemoryCache()
+        
+        self._spatial_indexes = {}
 
     def provinces(self) -> List[ProvinceRecord]:
         """Fetch all provinces."""
@@ -359,6 +362,7 @@ class Nusantara:
     def clear_cache(self) -> None:
         """Clear all cached queries."""
         self.cache.clear()
+        self._spatial_indexes.clear()
 
     # --- Boundaries On-Demand Helpers ---
     def download_boundaries(
@@ -433,6 +437,21 @@ class Nusantara:
         """Validate if the given postal code is a syntactically valid Indonesian postal code."""
         return _validate_postal_code(postal_code)
 
+    def _get_spatial_index(self, level: str) -> Any:
+        if level not in self._spatial_indexes:
+            records = []
+            if level == "provinces":
+                records = self.provinces()
+            elif level == "regencies":
+                records = [RegencyRecord(r, self.config, self) for r in self.reader.read_regencies()]
+            elif level == "districts":
+                records = [DistrictRecord(r, self.config, self) for r in self.reader.read_districts()]
+            elif level == "villages":
+                records = [VillageRecord(r, self.config, self) for r in self.reader.stream_all_villages()]
+            from py_nusantara.spatial import KDTree
+            self._spatial_indexes[level] = KDTree(records)
+        return self._spatial_indexes[level]
+
     def find_nearby(
         self, latitude: float, longitude: float, radius_km: float, level: str = "villages"
     ) -> List[BaseRecord]:
@@ -440,6 +459,27 @@ class Nusantara:
         if level not in ("provinces", "regencies", "districts", "villages"):
             raise ValueError("level must be one of: provinces, regencies, districts, villages")
 
+        spatial_index_enabled = self.config._config.get("boundaries", {}).get("spatial_index", True)
+        if spatial_index_enabled:
+            import math
+            from py_nusantara.spatial import latlon_to_3d
+            theta = radius_km / 6371.0
+            r_3d = 2.0 * math.sin(theta / 2.0)
+            query_pt_3d = latlon_to_3d(latitude, longitude)
+            tree = self._get_spatial_index(level)
+            candidates = tree.query_radius(query_pt_3d, r_3d)
+
+            results = []
+            for dist_3d, r in candidates:
+                r_lat = getattr(r, "latitude", None)
+                r_lon = getattr(r, "longitude", None)
+                if r_lat is not None and r_lon is not None:
+                    r.distance_km = haversine_distance(latitude, longitude, float(r_lat), float(r_lon))
+                    results.append(r)
+            results.sort(key=lambda x: getattr(x, "distance_km", 0.0))
+            return results
+
+        # Fallback to linear scan
         records: List[BaseRecord] = []
         if level == "provinces":
             records = self.provinces()
@@ -474,6 +514,55 @@ class Nusantara:
 
         results.sort(key=lambda x: getattr(x, "distance_km", 0.0))
         return results
+
+    def find_knn(
+        self, latitude: float, longitude: float, k: int = 5, level: str = "villages"
+    ) -> List[BaseRecord]:
+        """Find the K nearest neighbors of a specific level to the given coordinate."""
+        if level not in ("provinces", "regencies", "districts", "villages"):
+            raise ValueError("level must be one of: provinces, regencies, districts, villages")
+
+        spatial_index_enabled = self.config._config.get("boundaries", {}).get("spatial_index", True)
+        if spatial_index_enabled:
+            from py_nusantara.spatial import latlon_to_3d
+            query_pt_3d = latlon_to_3d(latitude, longitude)
+            tree = self._get_spatial_index(level)
+            candidates = tree.query_knn(query_pt_3d, k)
+
+            results = []
+            for dist_3d, r in candidates:
+                r_lat = getattr(r, "latitude", None)
+                r_lon = getattr(r, "longitude", None)
+                if r_lat is not None and r_lon is not None:
+                    r.distance_km = haversine_distance(latitude, longitude, float(r_lat), float(r_lon))
+                    results.append(r)
+            return results
+
+        # Fallback to linear scan
+        records = []
+        if level == "provinces":
+            records = self.provinces()
+        elif level == "regencies":
+            records = [RegencyRecord(r, self.config, self) for r in self.reader.read_regencies()]
+        elif level == "districts":
+            records = [DistrictRecord(r, self.config, self) for r in self.reader.read_districts()]
+        elif level == "villages":
+            records = [VillageRecord(r, self.config, self) for r in self.reader.stream_all_villages()]
+
+        results = []
+        for r in records:
+            r_lat = getattr(r, "latitude", None)
+            r_lon = getattr(r, "longitude", None)
+            if r_lat is not None and r_lon is not None:
+                try:
+                    dist = haversine_distance(latitude, longitude, float(r_lat), float(r_lon))
+                    r.distance_km = dist
+                    results.append(r)
+                except (ValueError, TypeError):
+                    pass
+
+        results.sort(key=lambda x: getattr(x, "distance_km", 0.0))
+        return results[:k]
 
 
 
@@ -612,6 +701,12 @@ def find_nearby(
     latitude: float, longitude: float, radius_km: float, level: str = "villages"
 ) -> List[BaseRecord]:
     return _get_instance().find_nearby(latitude, longitude, radius_km, level=level)
+
+
+def find_knn(
+    latitude: float, longitude: float, k: int = 5, level: str = "villages"
+) -> List[BaseRecord]:
+    return _get_instance().find_knn(latitude, longitude, k=k, level=level)
 
 
 # Historical mapping shortcut

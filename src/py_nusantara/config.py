@@ -71,6 +71,7 @@ class NusantaraConfig:
             "type": "spatial",  # "spatial" or "text"
             "spatial_index": True,
             "verify_checksum": True,
+            "use_geoalchemy2": False,
             "levels": {
                 "provinces": True,
                 "regencies": True,
@@ -147,3 +148,7 @@ class NusantaraConfig:
     @property
     def redis_url(self) -> Optional[str]:
         return self._config.get("cache", {}).get("redis_url")
+
+    @property
+    def use_geoalchemy2(self) -> bool:
+        return bool(self._config.get("boundaries", {}).get("use_geoalchemy2", False))

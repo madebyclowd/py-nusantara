@@ -44,10 +44,56 @@ def build_models(base_class: Any, config: NusantaraConfig) -> Dict[str, Type]:
     def db_col(level: str, name: str) -> str:
         return config.resolve_column_name(level, name)
 
+    # Resolve boundary column type
+    boundary_type = sa.Text
+    if config.use_geoalchemy2:
+        try:
+            import geoalchemy2 as ga
+            boundary_type = ga.Geometry(geometry_type='GEOMETRY', srid=4326)
+        except ImportError:
+            raise ImportError(
+                "geoalchemy2 is required when use_geoalchemy2 is enabled. "
+                "Install it via: pip install geoalchemy2 or uv add geoalchemy2"
+            )
+
+    def _orm_to_geojson(self) -> Dict[str, Any]:
+        props = {}
+        boundary_val = None
+        for attr_name in self.__mapper__.column_attrs.keys():
+            val = getattr(self, attr_name, None)
+            if attr_name == "boundary":
+                boundary_val = val
+            else:
+                props[attr_name] = val
+
+        from py_nusantara.spatial import parse_boundary_to_geojson_geometry
+        geom = None
+        if boundary_val:
+            geom = parse_boundary_to_geojson_geometry(boundary_val)
+
+        if not geom:
+            lat = getattr(self, "latitude", None)
+            lon = getattr(self, "longitude", None)
+            if lat is not None and lon is not None:
+                try:
+                    geom = {
+                        "type": "Point",
+                        "coordinates": [float(lon), float(lat)]
+                    }
+                except (ValueError, TypeError):
+                    pass
+
+        return {
+            "type": "Feature",
+            "geometry": geom,
+            "properties": props
+        }
+
     # 2. Build Province Attributes
     prov_attrs = {
         "__tablename__": prov_table,
         "__mapper_args__": {"confirm_deleted_rows": False},
+        "to_geojson": _orm_to_geojson,
     }
     
     # Map fields dynamically if enabled in config
@@ -70,12 +116,13 @@ def build_models(base_class: Any, config: NusantaraConfig) -> Dict[str, Type]:
     if config.is_column_enabled("provinces", "population"):
         prov_attrs["population"] = sa.Column(db_col("provinces", "population"), sa.Integer)
     if config.is_column_enabled("provinces", "boundary"):
-        prov_attrs["boundary"] = sa.Column(db_col("provinces", "boundary"), sa.Text)
+        prov_attrs["boundary"] = sa.Column(db_col("provinces", "boundary"), boundary_type)
 
     # 3. Build Regency Attributes
     reg_attrs = {
         "__tablename__": reg_table,
         "__mapper_args__": {"confirm_deleted_rows": False},
+        "to_geojson": _orm_to_geojson,
     }
     if config.is_column_enabled("regencies", "id"):
         reg_attrs["id"] = sa.Column(db_col("regencies", "id"), sa.String(4), primary_key=True)
@@ -102,12 +149,13 @@ def build_models(base_class: Any, config: NusantaraConfig) -> Dict[str, Type]:
     if config.is_column_enabled("regencies", "population"):
         reg_attrs["population"] = sa.Column(db_col("regencies", "population"), sa.Integer)
     if config.is_column_enabled("regencies", "boundary"):
-        reg_attrs["boundary"] = sa.Column(db_col("regencies", "boundary"), sa.Text)
+        reg_attrs["boundary"] = sa.Column(db_col("regencies", "boundary"), boundary_type)
 
     # 4. Build District Attributes
     dist_attrs = {
         "__tablename__": dist_table,
         "__mapper_args__": {"confirm_deleted_rows": False},
+        "to_geojson": _orm_to_geojson,
     }
     if config.is_column_enabled("districts", "id"):
         dist_attrs["id"] = sa.Column(db_col("districts", "id"), sa.String(6), primary_key=True)
@@ -124,12 +172,13 @@ def build_models(base_class: Any, config: NusantaraConfig) -> Dict[str, Type]:
     if config.is_column_enabled("districts", "longitude"):
         dist_attrs["longitude"] = sa.Column(db_col("districts", "longitude"), sa.Float)
     if config.is_column_enabled("districts", "boundary"):
-        dist_attrs["boundary"] = sa.Column(db_col("districts", "boundary"), sa.Text)
+        dist_attrs["boundary"] = sa.Column(db_col("districts", "boundary"), boundary_type)
 
     # 5. Build Village Attributes
     vil_attrs = {
         "__tablename__": vil_table,
         "__mapper_args__": {"confirm_deleted_rows": False},
+        "to_geojson": _orm_to_geojson,
     }
     if config.is_column_enabled("villages", "id"):
         vil_attrs["id"] = sa.Column(db_col("villages", "id"), sa.String(10), primary_key=True)
@@ -148,7 +197,7 @@ def build_models(base_class: Any, config: NusantaraConfig) -> Dict[str, Type]:
     if config.is_column_enabled("villages", "longitude"):
         vil_attrs["longitude"] = sa.Column(db_col("villages", "longitude"), sa.Float)
     if config.is_column_enabled("villages", "boundary"):
-        vil_attrs["boundary"] = sa.Column(db_col("villages", "boundary"), sa.Text)
+        vil_attrs["boundary"] = sa.Column(db_col("villages", "boundary"), boundary_type)
 
     # 6. Add Relationships
     prov_attrs["regencies"] = relationship("Regency", back_populates="province")

@@ -60,6 +60,36 @@ class BaseRecord:
                     res[logical_name] = getattr(self, logical_name)
         return res
 
+    def to_geojson(self) -> Dict[str, Any]:
+        """Convert the record to a GeoJSON Feature dictionary."""
+        props = self.to_dict(logical=True)
+        if "boundary" in props:
+            props.pop("boundary")
+
+        from py_nusantara.spatial import parse_boundary_to_geojson_geometry
+        geom = None
+        boundary_val = getattr(self, "boundary", None)
+        if boundary_val:
+            geom = parse_boundary_to_geojson_geometry(boundary_val)
+
+        if not geom:
+            lat = getattr(self, "latitude", None)
+            lon = getattr(self, "longitude", None)
+            if lat is not None and lon is not None:
+                try:
+                    geom = {
+                        "type": "Point",
+                        "coordinates": [float(lon), float(lat)]
+                    }
+                except (ValueError, TypeError):
+                    pass
+
+        return {
+            "type": "Feature",
+            "geometry": geom,
+            "properties": props
+        }
+
     def __repr__(self) -> str:
         try:
             name_val = getattr(self, "name")

@@ -2,20 +2,23 @@
 
 A highly customizable, enterprise-ready, and developer-friendly Python package for Indonesia's administrative regions database (Provinces, Regencies, Districts, and Villages). Compiled according to **Kepmendagri No 300.2.2-2138 Year 2025**.
 
-Designed for both backend backend integrations (with SQLAlchemy) and **data science environments** (Jupyter Notebooks, Google Colab) with direct, database-free access.
+Designed for both backend integrations (with SQLAlchemy) and **data science environments** (Jupyter Notebooks, Google Colab) with direct, database-free access.
 
 ---
 
 ## ⚡ Key Features
 
 * **Zero-DB Mode**: Load, query, and search regions directly from memory using gzipped CSV datasets—no database connection required.
+* **Fuzzy & Scoped Search**: Flexible name lookups with typo correction (Levenshtein, Trigram) and scope constraints (e.g. search within a specific province). Includes helpers like `clean_region_code` and `format_region_code`.
+* **Advanced Spatial Queries**: Efficient great-circle distance, radial search, and K-Nearest Neighbors (KNN) using an in-memory 3D KD-Tree, plus bounding box (BBox) viewport queries.
 * **Reverse Geocoding**: Resolve `(latitude, longitude)` coordinates directly to Province, Regency, District, and Village hierarchies using point-in-polygon boundary matching with Haversine distance fallback.
-* **On-Demand Boundaries (GIS)**: Keep the package size tiny. High-resolution geographic boundary coordinates (polygons/multipolygons) are downloaded only when you ask for them.
+* **Historical Regional Mapping**: Transparent handling of legacy codes and historical splits (e.g. Papua province splits), supporting lookup methods and NIK processing from older datasets.
+* **GIS Boundaries & GeoJSON**: Download high-resolution geographic boundaries on-demand, convert boundaries to WKT, or export records directly to standard GeoJSON features using `.to_geojson()`.
 * **Data Science Ready**: Convert records directly to Pandas or Polars DataFrames using simple helpers (e.g. `provinces_df()`).
 * **Complete Schema Freedom**: Custom table names and column renames matching your corporate schema guidelines.
 * **Dynamic Property Accessors**: Intercepts attribute calls to logically mapped names (e.g. access `province.name` even if configured as `nama_provinsi` in your database).
 * **Pluggable Caching**: Built-in TTL caching (InMemoryCache) with optional Redis support to minimize file parsing or database query overhead.
-* **Low-Memory Seeder**: Streams datasets and seeds databases in bulk chunks (e.g., SQLite, PostgreSQL, MySQL, SQL Server) using SQLAlchemy.
+* **Low-Memory Seeder**: Streams datasets and seeds databases in bulk chunks (e.g., SQLite, PostgreSQL, MySQL, SQL Server) using SQLAlchemy, supporting both synchronous and asynchronous operations.
 
 ---
 
@@ -62,14 +65,6 @@ regencies = province.regencies
 first_regency = regencies[0]
 print(f"Regency Name: {first_regency.name}")
 
-districts = first_regency.districts
-first_district = districts[0]
-
-villages = first_district.villages
-if villages:
-    first_village = villages[0]
-    print(f"Village: {first_village.name} (Postal: {first_village.postal_code})")
-
 # 4. Search regions dynamically across all levels
 results = nus.search("Bakongan")
 # Returns: {"provinces": [], "regencies": [], "districts": [...], "villages": [...]}
@@ -77,11 +72,31 @@ results = nus.search("Bakongan")
 
 ---
 
-## 📍 Reverse Geocoding (Coordinate Resolution)
+## 🔍 Fuzzy & Scoped Search
 
-Resolve any `(latitude, longitude)` coordinate into the corresponding administrative hierarchy (Province, Regency, District, Village).
+Search for administrative divisions dynamically with typo correction and parent constraints:
 
-If boundaries are downloaded and enabled, it performs a point-in-polygon containing check. If boundaries are missing or the coordinate lies slightly outside the exact borders, it falls back to finding the nearest centroid using the Haversine formula.
+```python
+import py_nusantara as nus
+
+# 1. Fuzzy Search to correct typos (e.g. "Makasar" -> "Kota Makassar")
+res_fuzzy = nus.search("Makasar", fuzzy=True, threshold=0.7, similarity_method="levenshtein")
+# Methods supported: "levenshtein" and "trigram"
+
+# 2. Scoped Search: Search "Bakongan" but only within Aceh (Province ID "11")
+res_scoped = nus.search("Bakongan", scope={"province_id": "11"})
+
+# 3. Clean and format regional codes dynamically
+cleaned = nus.clean_region_code("32.73.01.2001") # "3273012001"
+formatted = nus.format_region_code("3273012001") # "32.73.01.2001"
+is_valid = nus.validate_region_code("32.73.01.2001") # True
+```
+
+---
+
+## 📍 Reverse Geocoding & Spatial Queries
+
+Resolve any `(latitude, longitude)` coordinate into the corresponding administrative hierarchy. You can also run spatial queries using the package's in-memory 3D KD-Tree:
 
 ```python
 import py_nusantara as nus
@@ -89,13 +104,22 @@ import py_nusantara as nus
 # 1. Resolve containing regions (falls back to nearest centroids by default)
 regions = nus.find_by_coordinate(latitude=-6.1751, longitude=106.8650)
 
-print(regions["province"])  # ProvinceRecord (DKI Jakarta)
-print(regions["regency"])   # RegencyRecord (Kota Jakarta Pusat)
-print(regions["district"])  # DistrictRecord
-print(regions["village"])   # VillageRecord
+# 2. K-Nearest Neighbors (KNN) Spatial Search
+# Find the 3 nearest provinces to a coordinate
+nearest_provs = nus.find_knn(5.54, 95.32, k=3, level="provinces")
 
-# 2. Disable centroid distance fallback (only returns exact boundary containment matches)
-exact_regions = nus.find_by_coordinate(-6.1751, 106.8650, fallback_to_nearest=False)
+# 3. Radial Nearby Search
+# Find all districts within 50 km of a coordinate
+nearby_districts = nus.find_nearby(5.54, 95.32, radius_km=50.0, level="districts")
+
+# 4. Bounding Box (BBox) Query
+# Find all provinces inside or intersecting a bounding box
+bbox_provs = nus.find_in_bbox(min_lat=2.0, min_lon=95.0, max_lat=6.0, max_lon=98.0, level="provinces")
+
+# 5. Distance between two administrative entities in kilometers
+prov1 = nus.find_province("11") # Aceh
+prov2 = nus.find_province("12") # Sumatera Utara
+distance = prov1.distance_to(prov2)
 ```
 
 ---
@@ -116,9 +140,31 @@ df_regencies = nus.regencies_df(province_id="11")
 
 ---
 
-## 🌐 On-Demand Geographic Boundaries (GIS)
+## 📜 Historical Mapping & NIK Parsing
 
-By default, boundary coordinate data is excluded to keep the package lightweight. When needed, they can be downloaded and cached locally.
+Transparently resolve obsolete/legacy regional IDs (from historical Splits) and parse legacy NIK numbers:
+
+```python
+import py_nusantara as nus
+
+# 1. Historical split mapping
+# Merauke old code "9101" maps to active "9301" in Papua Selatan
+active_id = nus.resolve_legacy_id("9101") # "9301"
+
+# Lookups automatically resolve legacy IDs
+merauke = nus.find_regency("9101")
+print(merauke.id) # "9301"
+
+# 2. Parsing a NIK (including legacy codes)
+nik_info = nus.parse_nik("9101010402020001")
+print(nik_info.province.name) # "Papua Selatan" (Correctly mapped to active ID "93")
+```
+
+---
+
+## 🌐 On-Demand Geographic Boundaries & GeoJSON
+
+By default, boundary coordinate data is excluded to keep the package lightweight. When needed, they can be downloaded and cached locally, or exported to GeoJSON:
 
 ```python
 import py_nusantara as nus
@@ -135,44 +181,61 @@ nus.download_boundaries(levels="provinces")
 
 # 3. Access coordinates directly in memory or dataframe
 aceh = nus.find_province("11")
-print(aceh.boundary) # Raw JSON coordinate array
 
 # 4. Format JSON to WKT (Well-Known Text) for spatial engines
 wkt = nus.json_to_wkt(aceh.boundary)
-print(wkt) # e.g. "POLYGON((95.3 5.5, ...))"
+
+# 5. Export record to standard GeoJSON Feature dictionary
+geojson_feat = aceh.to_geojson()
 ```
 
 ---
 
 ## 🏛️ Database Integration & Seeding (SQLAlchemy)
 
-Create tables and bulk seed administrative data into your SQLAlchemy-supported database:
+Create tables and bulk seed administrative data into your database, supporting both synchronous and asynchronous connections:
 
+### Synchronous Seeding
 ```python
 from sqlalchemy import create_engine
 from sqlalchemy.orm import declarative_base, sessionmaker
 import py_nusantara as nus
 
-# 1. Setup SQLAlchemy Connection
 engine = create_engine("sqlite:///nusantara.db")
 Session = sessionmaker(bind=engine)
 session = Session()
 
 Base = declarative_base()
-
-# 2. Build Models dynamically matching your configuration
 models = nus.build_models(Base, nus.Nusantara().config)
-# Generates ORM classes: models["Province"], models["Regency"], models["District"], models["Village"]
 
-# 3. Create tables in Database
 Base.metadata.create_all(engine)
 
-# 4. Seed core datasets (Streams gzipped files in chunks under 2MB memory)
+# Seed core datasets and boundaries
 seeder = nus.NusantaraSeeder(session, nus.Nusantara().config, nus.Nusantara().reader)
 seeder.seed()
+seeder.seed_boundaries(levels=["provinces"])
+```
 
-# 5. Seed boundaries (Optional, run download_boundaries first)
-seeder.seed_boundaries(levels=["provinces", "regencies"])
+### Asynchronous Seeding (using sqlalchemy.ext.asyncio)
+```python
+from sqlalchemy.ext.asyncio import create_async_engine, AsyncSession
+from sqlalchemy.orm import declarative_base
+import py_nusantara as nus
+
+engine = create_async_engine("postgresql+asyncpg://user:pass@localhost/dbname")
+async_session = AsyncSession(engine)
+
+Base = declarative_base()
+models = nus.build_models(Base, nus.Nusantara().config)
+
+# Run migrations and seed data asynchronously
+async def main():
+    async with engine.begin() as conn:
+        await conn.run_sync(Base.metadata.create_all)
+        
+    seeder = nus.NusantaraSeeder(async_session, nus.Nusantara().config, nus.Nusantara().reader)
+    await seeder.seed_async()
+    await seeder.seed_boundaries_async(levels=["provinces"])
 ```
 
 ---

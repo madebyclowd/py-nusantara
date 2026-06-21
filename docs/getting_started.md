@@ -111,6 +111,19 @@ custom_config = {
 nus = Nusantara(custom_config)
 ```
 
+### Logo Configuration
+
+By default, regional logos are enabled and point to the custom domain CDN (`https://data.clowdlab.com/nusantara/logos`). You can override or disable this in the configuration:
+
+```python
+config = {
+    "logo": {
+        "enabled": True,                                        # Enable logo URL generation
+        "base_url": "https://your-custom-cdn.com/assets/logos"  # Custom CDN base URL
+    }
+}
+```
+
 ### Dynamic Property Accessors
 
 Even if you rename columns (e.g., `name` $\rightarrow$ `nama_provinsi` or `latitude` $\rightarrow$ `lat_y`), the library maps them dynamically back to the standard record properties:

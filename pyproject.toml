@@ -1,6 +1,6 @@
 [project]
 name = "py-nusantara"
-version = "0.3.2"
+version = "0.3.3"
 description = "A customizable, enterprise-ready Python package for Indonesia's administrative regions database."
 readme = "README.md"
 authors = [

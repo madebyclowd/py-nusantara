@@ -1367,5 +1367,57 @@ def test_async_spatial_index_preloading():
     asyncio.run(run_async_init())
 
 
+def test_regional_logo_integration():
+    from py_nusantara import find_province, find_regency, find_district, find_village, Nusantara
+    from py_nusantara.config import NusantaraConfig
+    
+    # 1. Test default logo configuration
+    cfg = NusantaraConfig()
+    assert cfg.logo_enabled is True
+    assert cfg.logo_base_url == "https://data.clowdlab.com/nusantara/logos"
+
+    # 2. Test logo URLs for default active instance (via find_province/find_regency/etc.)
+    aceh = find_province("11")
+    assert aceh is not None
+    assert aceh.logo_url == "https://data.clowdlab.com/nusantara/logos/provinces/11.webp"
+
+    aceh_barat = find_regency("1101")
+    assert aceh_barat is not None
+    assert aceh_barat.logo_url == "https://data.clowdlab.com/nusantara/logos/regencies/1101.webp"
+
+    dist = find_district("110101")
+    if dist:
+        assert dist.logo_url is None
+        
+    vill = find_village("1101012001")
+    if vill:
+        assert vill.logo_url is None
+
+    # 3. Test that logo_url is present in to_dict()
+    aceh_dict = aceh.to_dict(logical=True)
+    assert "logo_url" in aceh_dict
+    assert aceh_dict["logo_url"] == "https://data.clowdlab.com/nusantara/logos/provinces/11.webp"
+
+    # 4. Test disabling logos via custom configuration
+    custom_nus = Nusantara({
+        "logo": {
+            "enabled": False
+        }
+    })
+    custom_aceh = custom_nus.find_province("11")
+    assert custom_aceh.logo_url is None
+    assert custom_aceh.to_dict(logical=True)["logo_url"] is None
+
+    # 5. Test custom logo base URL
+    custom_nus_url = Nusantara({
+        "logo": {
+            "base_url": "https://custom-cdn.com/assets"
+        }
+    })
+    custom_aceh_url = custom_nus_url.find_province("11")
+    assert custom_aceh_url.logo_url == "https://custom-cdn.com/assets/provinces/11.webp"
+
+
+
 
 

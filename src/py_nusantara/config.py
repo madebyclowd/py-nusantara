@@ -84,6 +84,10 @@ class NusantaraConfig:
                 "villages": False,
             },
         },
+        "logo": {
+            "enabled": True,
+            "base_url": "https://data.clowdlab.com/nusantara/logos",
+        },
     }
 
     REQUIRED_KEYS = {
@@ -157,3 +161,12 @@ class NusantaraConfig:
     @property
     def use_geoalchemy2(self) -> bool:
         return bool(self._config.get("boundaries", {}).get("use_geoalchemy2", False))
+
+    @property
+    def logo_enabled(self) -> bool:
+        return bool(self._config.get("logo", {}).get("enabled", True))
+
+    @property
+    def logo_base_url(self) -> str:
+        return str(self._config.get("logo", {}).get("base_url", "https://data.clowdlab.com/nusantara/logos")).rstrip("/")
+

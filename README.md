@@ -24,6 +24,7 @@ For in-depth guides and production best practices, check out the specialized doc
 * **Reverse Geocoding**: Resolve `(latitude, longitude)` coordinates directly to Province, Regency, District, and Village hierarchies using point-in-polygon boundary matching with Haversine distance fallback.
 * **Historical Regional Mapping**: Transparent handling of legacy codes and historical splits (e.g. Papua province splits), supporting lookup methods and NIK processing from older datasets.
 * **GIS Boundaries & GeoJSON**: Download high-resolution geographic boundaries on-demand, convert boundaries to WKT, or export records directly to standard GeoJSON features using `.to_geojson()`.
+* **Official Regional Logos**: Retrieve CDN-hosted official regional emblem (lambang daerah) WebP URLs for all provinces and regencies directly from record wrappers.
 * **Data Science Ready**: Convert records directly to Pandas or Polars DataFrames using simple helpers (e.g. `provinces_df()`).
 * **Complete Schema Freedom**: Custom table names and column renames matching your corporate schema guidelines.
 * **Dynamic Property Accessors**: Intercepts attribute calls to logically mapped names (e.g. access `province.name` even if configured as `nama_provinsi` in your database).
@@ -197,6 +198,39 @@ wkt = nus.json_to_wkt(aceh.boundary)
 
 # 5. Export record to standard GeoJSON Feature dictionary
 geojson_feat = aceh.to_geojson()
+```
+
+---
+
+## 🏛️ Regional Logos (Emblems)
+
+Retrieve CDN URLs pointing to official regional logos/emblems (`.webp` format) for provinces and regencies. By default, logos are enabled and point to the custom domain CDN, but they can be custom configured or disabled:
+
+```python
+import py_nusantara as nus
+
+# 1. Access province logo URL
+aceh = nus.find_province("11")
+print(aceh.logo_url)  # "https://data.clowdlab.com/nusantara/logos/provinces/11.webp"
+
+# 2. Access regency logo URL
+aceh_barat = nus.find_regency("1101")
+print(aceh_barat.logo_url)  # "https://data.clowdlab.com/nusantara/logos/regencies/1101.webp"
+
+# 3. Dynamic fields are automatically serialized in to_dict()
+print(aceh.to_dict())  # Includes 'logo_url' key
+
+# Note: Districts and Villages do not have regional logos (returns None)
+district = nus.find_district("110101")
+print(district.logo_url)  # None
+
+# 4. Disable or customize base CDN URL in configuration
+nus.init({
+    "logo": {
+        "enabled": False,  # Turn off logo_url generation (will return None)
+        "base_url": "https://your-custom-cdn.com/logos"  # Override CDN URL host
+    }
+})
 ```
 
 ---

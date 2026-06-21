@@ -61,6 +61,11 @@ class BaseRecord:
         except AttributeError as e:
             raise KeyError(str(e))
 
+    @property
+    def logo_url(self) -> Optional[str]:
+        """Get the regional logo URL if available and enabled."""
+        return None
+
     def to_dict(self, logical: bool = True) -> Dict[str, Any]:
         """Convert the record to a dictionary.
         
@@ -76,6 +81,8 @@ class BaseRecord:
                 db_name = col_cfg.get("name", logical_name)
                 if db_name in self._data:
                     res[logical_name] = getattr(self, logical_name)
+        # Add dynamic logo URL
+        res["logo_url"] = self.logo_url
         return res
 
     def to_geojson(self) -> Dict[str, Any]:
@@ -136,6 +143,14 @@ class ProvinceRecord(BaseRecord):
     _level = "provinces"
 
     @property
+    def logo_url(self) -> Optional[str]:
+        """Get the official logo WebP image URL for the province."""
+        if not self._config.logo_enabled:
+            return None
+        base = self._config.logo_base_url
+        return f"{base}/provinces/{self.id}.webp"
+
+    @property
     def regencies(self) -> List["RegencyRecord"]:
         """Get all regencies belonging to this province."""
         facade = self.facade
@@ -167,6 +182,14 @@ class ProvinceRecord(BaseRecord):
 class RegencyRecord(BaseRecord):
     """Wrapper for a Regency record."""
     _level = "regencies"
+
+    @property
+    def logo_url(self) -> Optional[str]:
+        """Get the official logo WebP image URL for the regency."""
+        if not self._config.logo_enabled:
+            return None
+        base = self._config.logo_base_url
+        return f"{base}/regencies/{self.id}.webp"
 
     @property
     def province(self) -> Optional[ProvinceRecord]:
